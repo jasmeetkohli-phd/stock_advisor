@@ -1,1955 +1,3229 @@
-# app_complete.py - Stock Risk Advisor with enhanced UX
+# stock_risk_advisor_enhanced.py
+# Enhanced Stock Investment Risk Assessment App with comprehensive improvements
+# Fixes: UI tooltips, financial logic, CSV bugs, age mapping, validation, transparency
+
 import os
 import json
 import csv
 import io
 from datetime import datetime
-from io import BytesIO
-
+from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 
-# Import for PDF generation
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter
-from reportlab.lib import colors
+# Try to import ReportLab for PDF generation
+try:
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
 
-# -------------------------
-# CONFIG / TUNABLE CONSTANTS
-# -------------------------
-MINIMUM_INVESTMENT_THRESHOLD = 500          # rupees
-LOW_INVESTMENT_CONFIDENCE_THRESH = 1000    # rupees threshold used in confidence
-DEFAULT_PAGE_TITLE = "Stock Risk Advisor"
-ALLOCATION_TO_DB = {
-    "Large_Cap": "Large Cap Blue Chip",
-    "Mid_Cap": "Mid Cap",
-    "Small_Cap": "Small Cap",
-    "Growth": "Growth Stocks"
+# ============================================================================
+# CONFIGURATION & CONSTANTS
+# ============================================================================
+
+APP_TITLE = "📈 Stock Risk Advisor"
+APP_ICON = "📊"
+MODEL_VERSION = "2.1"
+MINIMUM_INVESTMENT_THRESHOLD = 500  # rupees
+CSV_FILE = "assessments_data_v2.csv"
+
+# Updated mapping dictionaries (more realistic Indian ranges)
+INCOME_MAP = {
+    1: 20000,   # < ₹25,000 (average 20k)
+    2: 37500,   # ₹25,001 – ₹50,000 (average 37.5k)
+    3: 62500,   # ₹50,001 – ₹75,000 (average 62.5k)
+    4: 87500,   # ₹75,001 – ₹1,00,000
+    5: 125000,  # ₹1,00,001 – ₹1,50,000
+    6: 200000   # Above ₹1,50,000
 }
-# Scoring / weights
+
+EXPENSES_MAP = {
+    1: 15000,   # Less than ₹20,000
+    2: 27500,   # ₹20,001 – ₹35,000
+    3: 42500,   # ₹35,001 – ₹50,000
+    4: 62500,   # ₹50,001 – ₹75,000
+    5: 87500,   # ₹75,001 – ₹1,00,000
+    6: 125000   # Above ₹1,00,000
+}
+
+EMERGENCY_MAP = {
+    1: 0,    # No emergency savings
+    2: 0.5,  # Less than 1 month
+    3: 2,    # 1–3 months
+    4: 5,    # 4–6 months (Recommended)
+    5: 9.5,  # 7–12 months
+    6: 15    # More than 12 months
+}
+
+# FIXED: Correct age-equity mapping (younger = more equity)
+AGE_EQUITY_MAP = {
+    1: 85,   # Under 25 years (higher equity allocation)
+    2: 75,   # 25-34 years
+    3: 65,   # 35-44 years
+    4: 55,   # 45-54 years
+    5: 40,   # 55-64 years
+    6: 30    # 65+ years (lower equity allocation)
+}
+
+TIMEFRAME_MAP = {
+    1: 1,   # Less than 2 years
+    2: 3,   # 2–4 years
+    3: 6,   # 5–7 years
+    4: 10,  # 8–12 years
+    5: 15,  # 13+ years
+    6: 10   # Multiple timeframes (conservative)
+}
+
+LOSS_TOLERANCE_MAP = {
+    1: 2.5,   # 0–5%
+    2: 10.5,  # 6–15%
+    3: 20.5,  # 16–25%
+    4: 30.5,  # 26–35%
+    5: 43,    # 36–50%
+    6: 60     # More than 50%
+}
+
+# Updated scoring weights (fixed double counting)
 WEIGHTS = {
-    "emergency": 0.35,
-    "debt": 0.25,
-    "savings": 0.20,
-    "income_stability": 0.20
+    "financial_stability": 0.30,
+    "risk_tolerance": 0.30,
+    "investment_horizon": 0.20,
+    "knowledge_experience": 0.20
 }
 
-# CSV file for storing assessment data
-CSV_FILE = "assessments_data.csv"
+# Stock database with enhanced categorization
+STOCKS_DB = {
+    "Large_Cap": [
+        {"symbol": "RELIANCE", "name": "Reliance Industries", "sector": "Energy", 
+         "risk": "Low", "note": "Market leader, diversified"},
+        {"symbol": "TCS", "name": "Tata Consultancy Services", "sector": "IT", 
+         "risk": "Low", "note": "IT services giant, stable"},
+        {"symbol": "HDFCBANK", "name": "HDFC Bank", "sector": "Banking", 
+         "risk": "Low", "note": "Premier private bank"},
+        {"symbol": "INFY", "name": "Infosys", "sector": "IT", 
+         "risk": "Low", "note": "Global IT consulting"},
+        {"symbol": "ICICIBANK", "name": "ICICI Bank", "sector": "Banking", 
+         "risk": "Low-Medium", "note": "Diversified banking services"}
+    ],
+    "Mid_Cap": [
+        {"symbol": "TITAN", "name": "Titan Company", "sector": "Consumer", 
+         "risk": "Medium", "note": "Lifestyle brand leader"},
+        {"symbol": "MARUTI", "name": "Maruti Suzuki", "sector": "Auto", 
+         "risk": "Medium", "note": "India's largest carmaker"},
+        {"symbol": "ASIANPAINT", "name": "Asian Paints", "sector": "Paints", 
+         "risk": "Medium", "note": "Paint industry leader"},
+        {"symbol": "BAJFINANCE", "name": "Bajaj Finance", "sector": "Financial", 
+         "risk": "Medium-High", "note": "Consumer financing leader"}
+    ],
+    "Small_Cap": [
+        {"symbol": "TATAELXSI", "name": "Tata Elxsi", "sector": "IT", 
+         "risk": "High", "note": "Design & technology services"},
+        {"symbol": "COFORGE", "name": "Coforge", "sector": "IT", 
+         "risk": "High", "note": "Digital IT solutions"},
+        {"symbol": "LAURUSLABS", "name": "Laurus Labs", "sector": "Pharma", 
+         "risk": "High", "note": "Pharmaceuticals & APIs"}
+    ],
+    "Growth": [
+        {"symbol": "DMART", "name": "Avenue Supermarts", "sector": "Retail", 
+         "risk": "Medium-High", "note": "Value retail chain"},
+        {"symbol": "BAJAJFINSV", "name": "Bajaj Finserv", "sector": "Financial", 
+         "risk": "Medium-High", "note": "Diversified financial services"},
+        {"symbol": "TECHM", "name": "Tech Mahindra", "sector": "IT", 
+         "risk": "Medium", "note": "Digital transformation services"}
+    ]
+}
 
-# Create directories if they don't exist
-os.makedirs("exports", exist_ok=True)
+# ETF recommendations for different risk profiles
+ETFS_DB = {
+    "VERY LOW RISK": ["NIFTYBEES", "BANKBEES", "GOLDBEES"],
+    "LOW RISK": ["NIFTYBEES", "MIDCAPBEES"],
+    "MEDIUM RISK": ["NIFTYBEES", "MIDCAPBEES"],
+    "HIGH RISK": ["MIDCAPBEES", "SMLCAPBEES"],
+    "VERY HIGH RISK": ["SMLCAPBEES"]
+}
 
-# -------------------------
-# PDF GENERATOR CLASS
-# -------------------------
-class AssessmentPDF:
-    def __init__(self, assessment_data):
-        self.assessment_data = assessment_data
-        self.buffer = io.BytesIO()
-        self.pdf = canvas.Canvas(self.buffer, pagesize=letter)
-        self.width, self.height = letter
-        
-    def draw_header(self):
-        self.pdf.setFont("Helvetica-Bold", 16)
-        self.pdf.drawCentredString(self.width/2, self.height - 50, "Stock Risk Advisor - Assessment Report")
-        self.pdf.setFont("Helvetica", 10)
-        self.pdf.drawCentredString(self.width/2, self.height - 70, 
-                                  f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-        self.pdf.line(50, self.height - 80, self.width - 50, self.height - 80)
-        
-    def draw_section_title(self, title, y_position):
-        self.pdf.setFont("Helvetica-Bold", 14)
-        self.pdf.setFillColorRGB(0.2, 0.4, 0.8)
-        self.pdf.drawString(50, y_position, title)
-        self.pdf.setFillColorRGB(0, 0, 0)
-        return y_position - 20
-    
-    def draw_key_value(self, key, value, y_position, indent=0):
-        self.pdf.setFont("Helvetica-Bold", 12)
-        self.pdf.drawString(50 + indent, y_position, f"{key}:")
-        self.pdf.setFont("Helvetica", 12)
-        self.pdf.drawString(150 + indent, y_position, str(value))
-        return y_position - 20
-    
-    def draw_bullet_point(self, text, y_position, indent=20):
-        self.pdf.setFont("Helvetica", 12)
-        self.pdf.drawString(50 + indent, y_position, f"• {text}")
-        return y_position - 15
-    
-    def draw_checklist_item(self, text, y_position, indent=20):
-        self.pdf.setFont("Helvetica", 12)
-        self.pdf.drawString(50 + indent, y_position, f"✓ {text}")
-        return y_position - 15
-    
-    def generate_pdf(self):
-        y_position = self.height - 100
-        
-        # Header
-        self.draw_header()
-        y_position -= 30
-        
-        # Personal Information
-        y_position = self.draw_section_title("Personal Information", y_position)
-        
-        answers = self.assessment_data['answers']
-        y_position = self.draw_key_value("Assessment Date", datetime.now().strftime('%Y-%m-%d %H:%M'), y_position)
-        y_position = self.draw_key_value("Monthly Income", f"₹ {answers.get('monthly_income', 0):,.2f}", y_position)
-        y_position = self.draw_key_value("Monthly Expenses", f"₹ {answers.get('monthly_expenses', 0):,.2f}", y_position)
-        y_position = self.draw_key_value("Age Group", self.get_age_group(answers.get('age', 3)), y_position)
-        
-        # Financial Health
-        y_position -= 10
-        y_position = self.draw_section_title("Financial Health Score", y_position)
-        
-        financial_data = self.assessment_data.get('financial_data', {})
-        y_position = self.draw_key_value("Overall Score", f"{financial_data.get('financial_health_score', 0)}/100", y_position)
-        y_position = self.draw_key_value("Monthly Disposable", f"₹ {financial_data.get('disposable_income', 0):,.2f}", y_position)
-        y_position = self.draw_key_value("Debt Ratio", f"{financial_data.get('debt_ratio', 0):.2%}", y_position)
-        
-        # Risk Profile
-        y_position -= 10
-        y_position = self.draw_section_title("Risk Profile", y_position)
-        
-        risk_scores = self.assessment_data.get('risk_scores', {})
-        y_position = self.draw_key_value("Risk Category", self.assessment_data.get('risk_category', 'N/A'), y_position)
-        y_position = self.draw_key_value("Total Risk Score", f"{risk_scores.get('total_score', 0)}/90", y_position)
-        
-        # Investment Recommendations
-        y_position -= 10
-        y_position = self.draw_section_title("Investment Recommendations", y_position)
-        
-        investment_data = self.assessment_data.get('investment_data', {})
-        y_position = self.draw_key_value("Monthly Investment", f"₹ {investment_data.get('safe_monthly_investment', 0):,.2f}", y_position)
-        y_position = self.draw_key_value("Annual Investment", f"₹ {investment_data.get('annual_investment', 0):,.2f}", y_position)
-        
-        # Portfolio Allocation
-        y_position -= 10
-        y_position = self.draw_section_title("Portfolio Allocation", y_position)
-        
-        allocation = self.assessment_data.get('allocation', {})
-        for category, percentage in allocation.items():
-            amount = (percentage / 100.0) * investment_data.get('safe_monthly_investment', 0)
-            y_position = self.draw_key_value(f"{category}", f"{percentage}% (₹ {amount:,.2f}/month)", y_position, indent=10)
-        
-        # Action Plan
-        y_position -= 10
-        y_position = self.draw_section_title("Action Plan", y_position)
-        
-        if investment_data.get('ef_gap_amount', 0) > 0:
-            y_position = self.draw_bullet_point(f"Build Emergency Fund: Save ₹ {investment_data.get('monthly_ef_saving', 0):,.2f}/month for {investment_data.get('ef_build_timeline', 0)} months", y_position)
-        
-        if answers.get('high_interest_debt', 0) > 0:
-            y_position = self.draw_bullet_point(f"Pay High-Interest Debt: Minimum ₹ {investment_data.get('monthly_debt_payment', 0):,.2f}/month", y_position)
-        
-        if investment_data.get('safe_monthly_investment', 0) > 0:
-            y_position = self.draw_bullet_point(f"Start Investing: ₹ {investment_data.get('safe_monthly_investment', 0):,.2f}/month as per allocation", y_position)
-        
-        # Monthly Checklist
-        y_position -= 10
-        y_position = self.draw_section_title("Monthly Checklist", y_position)
-        
-        if investment_data.get('monthly_ef_saving', 0) > 0:
-            y_position = self.draw_checklist_item(f"Save ₹ {investment_data.get('monthly_ef_saving', 0):,.2f} for emergency fund", y_position)
-        
-        if investment_data.get('monthly_debt_payment', 0) > 0:
-            y_position = self.draw_checklist_item(f"Pay ₹ {investment_data.get('monthly_debt_payment', 0):,.2f} towards high-interest debt", y_position)
-        
-        if investment_data.get('safe_monthly_investment', 0) > 0:
-            y_position = self.draw_checklist_item(f"Invest ₹ {investment_data.get('safe_monthly_investment', 0):,.2f} as per allocation", y_position)
-        
-        # Disclaimer
-        y_position -= 20
-        self.pdf.setFont("Helvetica-Oblique", 10)
-        self.pdf.drawString(50, y_position, "Disclaimer: This report is for educational purposes only.")
-        y_position -= 15
-        self.pdf.drawString(50, y_position, "We are not SEBI-registered investment advisors. This is not financial advice.")
-        
-        # Save the PDF
-        self.pdf.save()
-        
-        # Get the PDF bytes
-        self.buffer.seek(0)
-        return self.buffer
+# ============================================================================
+# CORE CLASSES
+# ============================================================================
+
+class RiskCalculator:
+    """Enhanced calculator with fixed logic and transparency"""
     
     @staticmethod
-    def get_age_group(age_score):
-        age_map = {
-            1: "56-65+ years",
-            2: "46-55 years",
-            3: "36-45 years",
-            4: "25-35 years",
-            5: "Under 25 years"
+    def map_to_score(value: int, min_val: int = 1, max_val: int = 6, reverse: bool = False) -> float:
+        """Map 1-6 scale to 0-100 score"""
+        if reverse:
+            value = max_val - value + min_val
+        return ((value - min_val) / (max_val - min_val)) * 100
+    
+    @staticmethod
+    def validate_answers(answers: Dict[str, int]) -> Tuple[bool, List[str]]:
+        """Validate answers for consistency and logic"""
+        warnings = []
+        
+        # Check all questions answered
+        for i in range(1, 15):
+            if f'q{i}' not in answers or answers[f'q{i}'] is None:
+                return False, [f"Question {i} not answered"]
+        
+        # Validate income vs expenses (realistic check)
+        q1 = answers.get('q1', 3)
+        q2 = answers.get('q2', 3)
+        
+        income_val = INCOME_MAP.get(q1, 0)
+        expense_val = EXPENSES_MAP.get(q2, 0)
+        
+        if expense_val > income_val * 0.95:  # 95% threshold
+            warnings.append("Your expenses seem very high relative to income. Please review if accurate.")
+        
+        # Check emergency fund vs timeframe mismatch
+        q3 = answers.get('q3', 3)
+        q6 = answers.get('q6', 3)
+        
+        if q3 <= 2 and q6 <= 2:  # Low emergency fund + short timeframe
+            warnings.append("Low emergency fund with short investment timeframe may be risky")
+        
+        return True, warnings
+    
+    @staticmethod
+    def calculate_financial_score(answers: Dict[str, int]) -> Dict[str, float]:
+        """Calculate Financial Health Score (0-100) based on Q1-Q4"""
+        monthly_income = INCOME_MAP.get(answers.get('q1', 3), 62500)
+        monthly_expenses = EXPENSES_MAP.get(answers.get('q2', 3), 42500)
+        emergency_score = answers.get('q3', 3)
+        debt_score = answers.get('q4', 3)
+        
+        # Emergency Fund Component (0-100)
+        emergency_component = RiskCalculator.map_to_score(emergency_score)
+        
+        # Debt Component (reverse scale: less debt = higher score)
+        debt_component = RiskCalculator.map_to_score(debt_score, reverse=True)
+        
+        # Savings Rate Component
+        if monthly_income > 0:
+            savings_rate = (monthly_income - monthly_expenses) / monthly_income
+            
+            if savings_rate <= 0:
+                savings_rate_component = 0
+            elif savings_rate >= 0.3:  # 30% savings rate = excellent
+                savings_rate_component = 100
+            else:
+                # Linear scale: 0% savings = 0, 30% savings = 100
+                savings_rate_component = (savings_rate / 0.3) * 100
+        else:
+            savings_rate_component = 0
+        
+        # Calculate final financial score (weighted average)
+        financial_score = (
+            0.40 * emergency_component +      # Emergency fund is most important
+            0.35 * debt_component +          # Debt situation second
+            0.25 * savings_rate_component    # Savings rate third
+        )
+        
+        # Calculate supporting metrics
+        disposable_income = max(0, monthly_income - monthly_expenses)
+        savings_rate_pct = (disposable_income / monthly_income * 100) if monthly_income > 0 else 0
+        
+        return {
+            'financial_score': round(financial_score, 2),
+            'emergency_component': round(emergency_component, 2),
+            'debt_component': round(debt_component, 2),
+            'savings_component': round(savings_rate_component, 2),
+            'disposable_income': round(disposable_income, 2),
+            'savings_rate': round(savings_rate_pct, 2),
+            'monthly_income': monthly_income,
+            'monthly_expenses': monthly_expenses,
+            'emergency_months': EMERGENCY_MAP.get(emergency_score, 2)
         }
-        return age_map.get(age_score, "Unknown")
-
-# -------------------------
-# CSV DATA HANDLER
-# -------------------------
-class CSVDataHandler:
+    
     @staticmethod
-    def save_assessment_to_csv(assessment_data):
-        """Save assessment data to CSV file"""
+    def calculate_risk_tolerance(answers: Dict[str, int]) -> Dict[str, float]:
+        """Calculate Risk Tolerance Score from psychology questions (Q7-Q10)"""
+        scores = {
+            'loss_importance': answers.get('q7', 3),  # Q7: Avoiding loss importance
+            'emotional': answers.get('q8', 3),        # Q8: Reaction to drop
+            'loss_tolerance': answers.get('q9', 3),   # Q9: Max tolerable loss
+            'volatility_view': answers.get('q10', 3)  # Q10: View on volatility
+        }
+        
+        # Convert to 0-100 scale with appropriate direction
+        components = {
+            'loss_importance': RiskCalculator.map_to_score(scores['loss_importance'], reverse=True),
+            'emotional': RiskCalculator.map_to_score(scores['emotional']),
+            'loss_tolerance': RiskCalculator.map_to_score(scores['loss_tolerance']),
+            'volatility_view': RiskCalculator.map_to_score(scores['volatility_view'])
+        }
+        
+        # Weighted risk tolerance score
+        risk_tolerance_score = (
+            0.30 * components['loss_importance'] +  # How important is avoiding loss
+            0.25 * components['emotional'] +        # Emotional reaction
+            0.30 * components['loss_tolerance'] +   # Actual loss tolerance
+            0.15 * components['volatility_view']    # View on volatility
+        )
+        
+        return {
+            'risk_tolerance_score': round(risk_tolerance_score, 2),
+            'components': components,
+            'max_tolerable_loss_pct': LOSS_TOLERANCE_MAP.get(scores['loss_tolerance'], 20.5)
+        }
+    
+    @staticmethod
+    def calculate_horizon_score(answers: Dict[str, int]) -> Dict[str, float]:
+        """Calculate Investment Horizon Score (Q5, Q6, Q13)"""
+        scores = {
+            'goal': answers.get('q5', 4),      # Q5: Investment goal
+            'timeframe': answers.get('q6', 3),  # Q6: Timeframe
+            'liquidity': answers.get('q13', 4)  # Q13: Liquidity needs
+        }
+        
+        # Convert to 0-100 scale
+        components = {
+            'goal': RiskCalculator.map_to_score(scores['goal']),
+            'timeframe': RiskCalculator.map_to_score(scores['timeframe']),
+            'liquidity': RiskCalculator.map_to_score(scores['liquidity'], reverse=True)
+        }
+        
+        # Weighted horizon score
+        horizon_score = (
+            0.40 * components['goal'] +      # Goal importance
+            0.40 * components['timeframe'] + # Timeframe length
+            0.20 * components['liquidity']   # Liquidity needs (reverse)
+        )
+        
+        return {
+            'horizon_score': round(horizon_score, 2),
+            'components': components,
+            'timeframe_years': TIMEFRAME_MAP.get(scores['timeframe'], 6)
+        }
+    
+    @staticmethod
+    def calculate_knowledge_score(answers: Dict[str, int]) -> Dict[str, float]:
+        """Calculate Knowledge & Experience Score (Q11, Q12)"""
+        scores = {
+            'experience': answers.get('q11', 2),  # Q11: Experience
+            'knowledge': answers.get('q12', 2)    # Q12: Knowledge
+        }
+        
+        # Convert to 0-100 scale
+        components = {
+            'experience': RiskCalculator.map_to_score(scores['experience']),
+            'knowledge': RiskCalculator.map_to_score(scores['knowledge'])
+        }
+        
+        # Weighted knowledge score
+        knowledge_score = (
+            0.60 * components['experience'] +  # Experience weighted more
+            0.40 * components['knowledge']     # Knowledge weighted less
+        )
+        
+        return {
+            'knowledge_score': round(knowledge_score, 2),
+            'components': components
+        }
+    
+    @staticmethod
+    def calculate_overall_risk_score(answers: Dict[str, int]) -> Dict[str, Any]:
+        """Calculate Overall Risk Score using fixed weights (no double counting)"""
+        # Calculate individual components
+        financial_data = RiskCalculator.calculate_financial_score(answers)
+        risk_tolerance_data = RiskCalculator.calculate_risk_tolerance(answers)
+        horizon_data = RiskCalculator.calculate_horizon_score(answers)
+        knowledge_data = RiskCalculator.calculate_knowledge_score(answers)
+        
+        # Weighted overall score (using FIXED weights)
+        overall_score = (
+            WEIGHTS['financial_stability'] * financial_data['financial_score'] +
+            WEIGHTS['risk_tolerance'] * risk_tolerance_data['risk_tolerance_score'] +
+            WEIGHTS['investment_horizon'] * horizon_data['horizon_score'] +
+            WEIGHTS['knowledge_experience'] * knowledge_data['knowledge_score']
+        )
+        
+        return {
+            'overall_risk_score': round(overall_score, 2),
+            'financial_data': financial_data,
+            'risk_tolerance_data': risk_tolerance_data,
+            'horizon_data': horizon_data,
+            'knowledge_data': knowledge_data,
+            'weights_used': WEIGHTS,
+            'model_version': MODEL_VERSION
+        }
+    
+    @staticmethod
+    def get_risk_category(overall_risk_score: float) -> str:
+        """Determine risk category based on score"""
+        if overall_risk_score <= 20:
+            return "VERY LOW RISK"
+        elif overall_risk_score <= 40:
+            return "LOW RISK"
+        elif overall_risk_score <= 60:
+            return "MEDIUM RISK"
+        elif overall_risk_score <= 80:
+            return "HIGH RISK"
+        else:
+            return "VERY HIGH RISK"
+    
+    @staticmethod
+    def check_investment_suitability(answers: Dict[str, int], financial_data: Dict[str, float]) -> Dict[str, Any]:
+        """Check if user should invest in stocks at all"""
+        emergency_score = answers.get('q3', 3)
+        debt_score = answers.get('q4', 3)
+        liquidity_score = answers.get('q13', 4)
+        
+        warnings = []
+        blocking_issues = []
+        
+        # CRITICAL ISSUES (block investment)
+        if emergency_score <= 1:  # No emergency savings
+            blocking_issues.append("No emergency savings")
+        
+        if debt_score >= 5:  # Significant debt stress
+            blocking_issues.append("Significant debt stress")
+        
+        if liquidity_score <= 1:  # Very likely to need money soon
+            blocking_issues.append("Very likely to need money within 1 year")
+        
+        # WARNINGS (caution advised)
+        if emergency_score <= 2:  # Less than 1 month
+            warnings.append("Emergency fund less than 1 month")
+        
+        if debt_score >= 4:  # High-interest debt concerns
+            warnings.append("High-interest debt concerns")
+        
+        if liquidity_score <= 2:  # Likely to need money in 1-2 years
+            warnings.append("May need money within 1-2 years")
+        
+        # Determine suitability
+        if blocking_issues:
+            suitability = "NOT SUITABLE"
+            recommendation = "Focus on building emergency fund and reducing debt before investing in stocks"
+        elif warnings:
+            suitability = "CAUTION ADVISED"
+            recommendation = "Consider addressing warnings before significant stock investment"
+        else:
+            suitability = "SUITABLE"
+            recommendation = "Proceed with recommended investment plan"
+        
+        return {
+            'suitability': suitability,
+            'blocking_issues': blocking_issues,
+            'warnings': warnings,
+            'recommendation': recommendation
+        }
+    
+    @staticmethod
+    def determine_portfolio_allocation(overall_risk_score: float, answers: Dict[str, int]) -> Dict[str, float]:
+        """Determine portfolio allocation with fixed age logic"""
+        # Get age-adjusted equity percentage
+        age_score = answers.get('q14', 4)
+        base_equity_pct = AGE_EQUITY_MAP.get(age_score, 65)  # FIXED: younger = more equity
+        
+        # Risk adjustment to base equity
+        risk_multiplier = overall_risk_score / 100  # 0 to 1
+        
+        # Adjusted equity percentage
+        adjusted_equity_pct = base_equity_pct * (0.7 + 0.3 * risk_multiplier)
+        
+        # Distribute equity across categories based on risk
+        if overall_risk_score <= 20:  # VERY LOW RISK
+            allocation = {
+                "Large_Cap": adjusted_equity_pct,
+                "Mid_Cap": 0,
+                "Small_Cap": 0,
+                "Growth": 0,
+                "Fixed_Income": 100 - adjusted_equity_pct
+            }
+        elif overall_risk_score <= 40:  # LOW RISK
+            allocation = {
+                "Large_Cap": adjusted_equity_pct * 0.8,
+                "Mid_Cap": adjusted_equity_pct * 0.2,
+                "Small_Cap": 0,
+                "Growth": 0,
+                "Fixed_Income": 100 - adjusted_equity_pct
+            }
+        elif overall_risk_score <= 60:  # MEDIUM RISK
+            allocation = {
+                "Large_Cap": adjusted_equity_pct * 0.6,
+                "Mid_Cap": adjusted_equity_pct * 0.3,
+                "Small_Cap": adjusted_equity_pct * 0.05,
+                "Growth": adjusted_equity_pct * 0.05,
+                "Fixed_Income": 100 - adjusted_equity_pct
+            }
+        elif overall_risk_score <= 80:  # HIGH RISK
+            allocation = {
+                "Large_Cap": adjusted_equity_pct * 0.4,
+                "Mid_Cap": adjusted_equity_pct * 0.3,
+                "Small_Cap": adjusted_equity_pct * 0.15,
+                "Growth": adjusted_equity_pct * 0.15,
+                "Fixed_Income": 100 - adjusted_equity_pct
+            }
+        else:  # VERY HIGH RISK
+            allocation = {
+                "Large_Cap": adjusted_equity_pct * 0.2,
+                "Mid_Cap": adjusted_equity_pct * 0.25,
+                "Small_Cap": adjusted_equity_pct * 0.25,
+                "Growth": adjusted_equity_pct * 0.3,
+                "Fixed_Income": 100 - adjusted_equity_pct
+            }
+        
+        # Normalize to ensure exact 100%
+        total = sum(allocation.values())
+        if abs(total - 100) > 0.01:
+            allocation = {k: (v / total) * 100 for k, v in allocation.items()}
+        
+        # Round to 1 decimal
+        allocation = {k: round(v, 1) for k, v in allocation.items()}
+        
+        # Ensure exact 100% after rounding
+        rounded_sum = sum(allocation.values())
+        if abs(rounded_sum - 100) > 0:
+            # Adjust largest category
+            largest_key = max(allocation, key=allocation.get)
+            allocation[largest_key] = round(allocation[largest_key] + (100 - rounded_sum), 1)
+        
+        return allocation
+    
+    @staticmethod
+    def calculate_safe_investment(answers: Dict[str, int], financial_data: Dict[str, float], 
+                                 risk_data: Dict[str, Any]) -> Dict[str, float]:
+        """Calculate safe monthly investment amount with enhanced logic"""
+        monthly_income = financial_data.get('monthly_income', 0)
+        monthly_expenses = financial_data.get('monthly_expenses', 0)
+        disposable_income = financial_data.get('disposable_income', 0)
+        financial_score = financial_data.get('financial_score', 0)
+        emergency_months = financial_data.get('emergency_months', 2)
+        
+        # Get suitability check
+        suitability = RiskCalculator.check_investment_suitability(answers, financial_data)
+        
+        # If not suitable, investment should be minimal or zero
+        if suitability['suitability'] == "NOT SUITABLE":
+            return {
+                'safe_monthly_investment': 0,
+                'annual_investment': 0,
+                'monthly_ef_saving': disposable_income * 0.5,
+                'monthly_debt_payment': disposable_income * 0.3,
+                'ef_gap_amount': max(0, 6 - emergency_months) * monthly_expenses,
+                'investment_percentage': 0,
+                'investment_confidence': "Very Low",
+                'suitability': suitability,
+                'recommendation_priority': "EMERGENCY_FUND_DEBT"
+            }
+        
+        # Calculate emergency fund gap
+        target_emergency_months = 6  # Recommended minimum
+        ef_gap_months = max(0, target_emergency_months - emergency_months)
+        ef_gap_amount = ef_gap_months * monthly_expenses
+        
+        # Debt priority
+        debt_score = answers.get('q4', 3)
+        debt_priority_amount = 0
+        if debt_score >= 4:  # High-interest debt concerns
+            debt_priority_percentage = 0.15 + (debt_score - 4) * 0.05
+            debt_priority_amount = disposable_income * debt_priority_percentage
+        
+        # Financial health multiplier
+        if financial_score < 40:
+            fh_multiplier = 0.0
+        elif financial_score < 60:
+            fh_multiplier = 0.15
+        elif financial_score < 80:
+            fh_multiplier = 0.25
+        else:
+            fh_multiplier = 0.35
+        
+        # Risk tolerance multiplier
+        risk_tolerance = risk_data.get('risk_tolerance_data', {}).get('risk_tolerance_score', 50)
+        risk_multiplier = risk_tolerance / 100
+        
+        # Timeframe multiplier
+        timeframe_score = answers.get('q6', 3)
+        timeframe_multiplier = min(1.0, TIMEFRAME_MAP.get(timeframe_score, 6) / 10)
+        
+        # Combined investment percentage
+        base_percentage = fh_multiplier * (0.5 + 0.5 * risk_multiplier)
+        investment_percentage = base_percentage * timeframe_multiplier
+        
+        # Calculate available after priorities
+        available_after_priorities = max(0, disposable_income - debt_priority_amount)
+        
+        # Emergency fund building
+        monthly_ef_saving = 0
+        if ef_gap_amount > 0 and disposable_income > 0:
+            build_timeline = min(18, max(6, int(ef_gap_months * 3)))
+            monthly_ef_saving = min(available_after_priorities * 0.5, ef_gap_amount / build_timeline)
+            available_for_investment = max(0, available_after_priorities - monthly_ef_saving)
+        else:
+            available_for_investment = available_after_priorities
+        
+        # Calculate safe investment
+        safe_monthly_investment = min(
+            available_for_investment * investment_percentage,
+            available_for_investment * 0.3  # Cap at 30% of available
+        )
+        
+        # Apply minimum threshold
+        if safe_monthly_investment < MINIMUM_INVESTMENT_THRESHOLD:
+            safe_monthly_investment = 0
+        
+        # Determine confidence
+        if safe_monthly_investment == 0:
+            confidence = "Very Low"
+        elif safe_monthly_investment < disposable_income * 0.05:
+            confidence = "Low"
+        elif safe_monthly_investment < disposable_income * 0.10:
+            confidence = "Medium"
+        elif safe_monthly_investment < disposable_income * 0.20:
+            confidence = "High"
+        else:
+            confidence = "Very High"
+        
+        # Determine priority
+        if ef_gap_amount > 0 and emergency_months < 3:
+            priority = "EMERGENCY_FUND"
+        elif debt_priority_amount > 0:
+            priority = "DEBT_REDUCTION"
+        else:
+            priority = "INVESTMENT"
+        
+        return {
+            'safe_monthly_investment': round(safe_monthly_investment, 2),
+            'annual_investment': round(safe_monthly_investment * 12, 2),
+            'monthly_ef_saving': round(monthly_ef_saving, 2),
+            'monthly_debt_payment': round(debt_priority_amount, 2),
+            'ef_gap_amount': round(ef_gap_amount, 2),
+            'ef_build_timeline': 12 if ef_gap_amount > 0 else 0,
+            'investment_percentage': round(investment_percentage * 100, 2),
+            'investment_confidence': confidence,
+            'available_for_investment': round(available_for_investment, 2),
+            'suitability': suitability,
+            'recommendation_priority': priority
+        }
+    
+    @staticmethod
+    def get_stock_recommendations(risk_category: str, allocation: Dict[str, float]) -> Dict[str, Any]:
+        """Get stock recommendations based on risk category"""
+        recommendations = {
+            "VERY LOW RISK": {
+                "strategy": "Conservative Income",
+                "description": "Focus on stability and regular income",
+                "stocks": STOCKS_DB["Large_Cap"][:3],
+                "etfs": ETFS_DB.get("VERY LOW RISK", []),
+                "allocation_notes": "Primarily large-cap stocks for stability"
+            },
+            "LOW RISK": {
+                "strategy": "Balanced Growth",
+                "description": "Mix of stability and moderate growth",
+                "stocks": STOCKS_DB["Large_Cap"][:4] + STOCKS_DB["Mid_Cap"][:1],
+                "etfs": ETFS_DB.get("LOW RISK", []),
+                "allocation_notes": "Mostly large-cap with some mid-cap exposure"
+            },
+            "MEDIUM RISK": {
+                "strategy": "Growth Oriented",
+                "description": "Balance of growth and reasonable risk",
+                "stocks": STOCKS_DB["Large_Cap"][:3] + STOCKS_DB["Mid_Cap"][:2] + STOCKS_DB["Growth"][:1],
+                "etfs": ETFS_DB.get("MEDIUM RISK", []),
+                "allocation_notes": "Diversified across market caps"
+            },
+            "HIGH RISK": {
+                "strategy": "Aggressive Growth",
+                "description": "Focus on growth with higher risk tolerance",
+                "stocks": STOCKS_DB["Large_Cap"][:2] + STOCKS_DB["Mid_Cap"][:2] + 
+                         STOCKS_DB["Small_Cap"][:1] + STOCKS_DB["Growth"][:2],
+                "etfs": ETFS_DB.get("HIGH RISK", []),
+                "allocation_notes": "Significant mid/small cap and growth exposure"
+            },
+            "VERY HIGH RISK": {
+                "strategy": "Speculative Growth",
+                "description": "High-risk, high-potential investments",
+                "stocks": STOCKS_DB["Mid_Cap"][:2] + STOCKS_DB["Small_Cap"][:2] + STOCKS_DB["Growth"][:2],
+                "etfs": ETFS_DB.get("VERY HIGH RISK", []),
+                "allocation_notes": "Heavy emphasis on growth and small caps"
+            }
+        }
+        
+        base_rec = recommendations.get(risk_category, recommendations["MEDIUM RISK"])
+        
+        # Filter stocks based on actual allocation
+        filtered_stocks = []
+        for stock in base_rec["stocks"]:
+            # Simple mapping of stock to category
+            if stock in STOCKS_DB["Large_Cap"] and allocation.get("Large_Cap", 0) > 0:
+                filtered_stocks.append(stock)
+            elif stock in STOCKS_DB["Mid_Cap"] and allocation.get("Mid_Cap", 0) > 0:
+                filtered_stocks.append(stock)
+            elif stock in STOCKS_DB["Small_Cap"] and allocation.get("Small_Cap", 0) > 0:
+                filtered_stocks.append(stock)
+            elif stock in STOCKS_DB["Growth"] and allocation.get("Growth", 0) > 0:
+                filtered_stocks.append(stock)
+        
+        # Limit to top 5-6 stocks
+        filtered_stocks = filtered_stocks[:6]
+        
+        return {
+            **base_rec,
+            "stocks": filtered_stocks
+        }
+
+
+class CSVDataHandler:
+    """Handles CSV data operations with enhanced error handling and proper storage"""
+    
+    @staticmethod
+    def save_assessment_to_csv(assessment_data: Dict[str, Any]) -> bool:
+        """Save assessment data to CSV with proper value storage"""
         try:
-            # Prepare data row
-            row_data = {
+            answers = assessment_data.get('answers', {})
+            financial_data = assessment_data.get('financial_data', {})
+            risk_data = assessment_data.get('risk_data', {})
+            investment_data = assessment_data.get('investment_data', {})
+            allocation = assessment_data.get('allocation', {})
+            risk_category = assessment_data.get('risk_category', 'Unknown')
+            
+            # Get actual values from maps (CRITICAL FIX)
+            income_code = answers.get('q1', 3)
+            expense_code = answers.get('q2', 3)
+            
+            row = {
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'monthly_income': assessment_data['answers'].get('monthly_income', 0),
-                'monthly_expenses': assessment_data['answers'].get('monthly_expenses', 0),
-                'emergency_fund': assessment_data['answers'].get('emergency', 3),
-                'high_interest_debt': assessment_data['answers'].get('high_interest_debt', 0),
-                'age_group': assessment_data['answers'].get('age', 3),
-                'investment_purpose': assessment_data['answers'].get('purpose', 3),
-                'time_horizon': assessment_data['answers'].get('horizon', 3),
-                'risk_behavior': assessment_data['answers'].get('risk_behavior', 3),
-                'experience': assessment_data['answers'].get('experience', 2),
-                'goal_priority': assessment_data['answers'].get('goal_priority', 2),
-                'loss_capacity': assessment_data['answers'].get('loss_capacity', 2),
-                'liquidity_need': assessment_data['answers'].get('liquidity_need', 2),
-                'financial_health_score': assessment_data.get('financial_data', {}).get('financial_health_score', 0),
-                'risk_category': assessment_data.get('risk_category', 'Unknown'),
-                'total_risk_score': assessment_data.get('risk_scores', {}).get('total_score', 0),
-                'monthly_investment': assessment_data.get('investment_data', {}).get('safe_monthly_investment', 0),
-                'annual_investment': assessment_data.get('investment_data', {}).get('annual_investment', 0),
-                'confidence_score': assessment_data.get('confidence_score', {}).get('score', 0),
-                'contradictions': assessment_data.get('contradictions', 0),
-                'portfolio_large_cap': assessment_data.get('allocation', {}).get('Large_Cap', 0),
-                'portfolio_mid_cap': assessment_data.get('allocation', {}).get('Mid_Cap', 0),
-                'portfolio_small_cap': assessment_data.get('allocation', {}).get('Small_Cap', 0),
-                'portfolio_growth': assessment_data.get('allocation', {}).get('Growth', 0)
+                'model_version': MODEL_VERSION,
+                
+                # Store BOTH code and actual value (CRITICAL)
+                'income_code': int(income_code),
+                'income_value': int(INCOME_MAP.get(income_code, 62500)),
+                'expense_code': int(expense_code),
+                'expense_value': int(EXPENSES_MAP.get(expense_code, 42500)),
+                
+                # Other answers
+                'emergency_fund': int(answers.get('q3', 3)),
+                'debt_situation': int(answers.get('q4', 3)),
+                'primary_goal': int(answers.get('q5', 4)),
+                'timeframe': int(answers.get('q6', 3)),
+                'loss_importance': int(answers.get('q7', 3)),
+                'emotional_reaction': int(answers.get('q8', 3)),
+                'loss_tolerance': int(answers.get('q9', 3)),
+                'volatility_view': int(answers.get('q10', 3)),
+                'experience': int(answers.get('q11', 2)),
+                'knowledge': int(answers.get('q12', 2)),
+                'liquidity_needs': int(answers.get('q13', 4)),
+                'age_group': int(answers.get('q14', 4)),
+                
+                # Scores
+                'financial_health_score': float(financial_data.get('financial_score', 0)),
+                'risk_tolerance_score': float(risk_data.get('risk_tolerance_data', {}).get('risk_tolerance_score', 0)),
+                'horizon_score': float(risk_data.get('horizon_data', {}).get('horizon_score', 0)),
+                'knowledge_score': float(risk_data.get('knowledge_data', {}).get('knowledge_score', 0)),
+                'overall_risk_score': float(risk_data.get('overall_risk_score', 0)),
+                
+                # Risk category
+                'risk_category': str(risk_category),
+                
+                # Investment recommendations
+                'monthly_investment': float(investment_data.get('safe_monthly_investment', 0)),
+                'annual_investment': float(investment_data.get('annual_investment', 0)),
+                'investment_confidence': str(investment_data.get('investment_confidence', 'Low')),
+                'suitability': str(investment_data.get('suitability', {}).get('suitability', 'Unknown')),
+                
+                # Portfolio allocation
+                'portfolio_large_cap': float(allocation.get('Large_Cap', 0)),
+                'portfolio_mid_cap': float(allocation.get('Mid_Cap', 0)),
+                'portfolio_small_cap': float(allocation.get('Small_Cap', 0)),
+                'portfolio_growth': float(allocation.get('Growth', 0)),
+                'portfolio_fixed_income': float(allocation.get('Fixed_Income', 0))
             }
             
-            # Check if file exists to write header
             file_exists = os.path.isfile(CSV_FILE)
             
-            with open(CSV_FILE, 'a', newline='', encoding='utf-8') as csvfile:
-                fieldnames = list(row_data.keys())
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                
+            with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=row.keys())
                 if not file_exists:
                     writer.writeheader()
-                writer.writerow(row_data)
-                
+                writer.writerow(row)
+            
             return True
         except Exception as e:
             st.error(f"Error saving to CSV: {str(e)}")
             return False
     
     @staticmethod
-    def load_assessments_from_csv():
-        """Load all assessments from CSV file"""
+    def load_assessments_from_csv() -> pd.DataFrame:
+        """Load assessments from CSV with robust error handling"""
         try:
             if not os.path.exists(CSV_FILE):
                 return pd.DataFrame()
             
-            df = pd.read_csv(CSV_FILE)
+            df = pd.read_csv(CSV_FILE, encoding='utf-8')
+            
+            if df.empty:
+                return df
+            
+            # Convert timestamp
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            
+            # Sort by timestamp
+            if 'timestamp' in df.columns:
+                df = df.sort_values('timestamp', ascending=False)
+            
             return df
         except Exception as e:
-            st.error(f"Error loading CSV: {str(e)}")
             return pd.DataFrame()
     
     @staticmethod
-    def get_statistics():
+    def get_statistics() -> Optional[Dict[str, Any]]:
         """Get statistics from stored assessments"""
-        df = CSVDataHandler.load_assessments_from_csv()
-        if df.empty:
+        try:
+            df = CSVDataHandler.load_assessments_from_csv()
+            if df.empty:
+                return None
+            
+            # Filter by model version if available
+            if 'model_version' in df.columns:
+                df = df[df['model_version'] == MODEL_VERSION]
+            
+            if df.empty:
+                return None
+            
+            # Calculate statistics
+            stats = {
+                'total_assessments': int(len(df)),
+                'model_version': MODEL_VERSION,
+                'avg_financial_health': 0.0,
+                'avg_risk_score': 0.0,
+                'most_common_risk_category': 'N/A',
+                'avg_monthly_investment': 0.0,
+                'recent_assessments': []
+            }
+            
+            # Calculate averages
+            if 'financial_health_score' in df.columns:
+                avg_fh = df['financial_health_score'].mean()
+                if not pd.isna(avg_fh):
+                    stats['avg_financial_health'] = float(avg_fh)
+            
+            if 'overall_risk_score' in df.columns:
+                avg_risk = df['overall_risk_score'].mean()
+                if not pd.isna(avg_risk):
+                    stats['avg_risk_score'] = float(avg_risk)
+            
+            if 'risk_category' in df.columns:
+                mode_result = df['risk_category'].mode()
+                if not mode_result.empty:
+                    stats['most_common_risk_category'] = mode_result.iloc[0]
+            
+            if 'monthly_investment' in df.columns:
+                avg_inv = df['monthly_investment'].mean()
+                if not pd.isna(avg_inv):
+                    stats['avg_monthly_investment'] = float(avg_inv)
+            
+            # Get recent assessments
+            try:
+                recent_df = df.head(5).copy()
+                stats['recent_assessments'] = recent_df.to_dict('records')
+            except:
+                stats['recent_assessments'] = []
+            
+            return stats
+        except Exception as e:
             return None
-        
-        stats = {
-            'total_assessments': len(df),
-            'avg_financial_health': df['financial_health_score'].mean(),
-            'most_common_risk_category': df['risk_category'].mode().iloc[0] if not df['risk_category'].mode().empty else 'N/A',
-            'avg_monthly_investment': df['monthly_investment'].mean(),
-            'recent_assessments': df.tail(5).to_dict('records')
-        }
-        return stats
 
-# -------------------------
-# PAGE CONFIG
-# -------------------------
+
+class AssessmentPDF:
+    """Generates enhanced PDF reports with explanations"""
+    
+    def __init__(self, assessment_data: Dict[str, Any]):
+        self.data = assessment_data
+        
+    def generate_pdf(self):
+        """Generate PDF report"""
+        buffer = io.BytesIO()
+        
+        if REPORTLAB_AVAILABLE:
+            pdf = canvas.Canvas(buffer, pagesize=letter)
+            width, height = letter
+            
+            # Header
+            pdf.setFont("Helvetica-Bold", 16)
+            pdf.drawCentredString(width/2, height - 50, "Stock Risk Advisor - Assessment Report")
+            pdf.setFont("Helvetica", 10)
+            pdf.drawCentredString(width/2, height - 70, 
+                                f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            pdf.drawCentredString(width/2, height - 85, f"Model Version: {MODEL_VERSION}")
+            pdf.line(50, height - 95, width - 50, height - 95)
+            
+            y_position = height - 115
+            
+            # Methodology Summary
+            pdf.setFont("Helvetica-Bold", 12)
+            pdf.drawString(50, y_position, "Methodology Summary:")
+            y_position -= 15
+            pdf.setFont("Helvetica", 10)
+            pdf.drawString(60, y_position, "• Based on 14 comprehensive questions")
+            y_position -= 15
+            pdf.drawString(60, y_position, "• Four assessment dimensions: Financial, Risk, Horizon, Knowledge")
+            y_position -= 15
+            pdf.drawString(60, y_position, "• Age-appropriate portfolio allocation")
+            y_position -= 25
+            
+            # Personal Information
+            pdf.setFont("Helvetica-Bold", 14)
+            pdf.drawString(50, y_position, "Personal Information")
+            y_position -= 20
+            
+            answers = self.data['answers']
+            pdf.setFont("Helvetica", 12)
+            pdf.drawString(50, y_position, f"Income: {self._get_income_range(answers.get('q1', 3))}")
+            y_position -= 15
+            pdf.drawString(50, y_position, f"Expenses: {self._get_expenses_range(answers.get('q2', 3))}")
+            y_position -= 15
+            pdf.drawString(50, y_position, f"Age Group: {self._get_age_group(answers.get('q14', 4))}")
+            y_position -= 20
+            
+            # Financial Health
+            pdf.setFont("Helvetica-Bold", 14)
+            pdf.drawString(50, y_position, "Financial Health")
+            y_position -= 20
+            
+            financial_data = self.data.get('financial_data', {})
+            pdf.setFont("Helvetica", 12)
+            pdf.drawString(50, y_position, f"Financial Health Score: {financial_data.get('financial_score', 0)}/100")
+            y_position -= 15
+            pdf.drawString(50, y_position, f"Emergency Fund: {self._get_emergency_status(answers.get('q3', 3))}")
+            y_position -= 15
+            pdf.drawString(50, y_position, f"Debt Situation: {self._get_debt_status(answers.get('q4', 3))}")
+            y_position -= 20
+            
+            # Risk Profile
+            pdf.setFont("Helvetica-Bold", 14)
+            pdf.drawString(50, y_position, "Risk Profile")
+            y_position -= 20
+            
+            pdf.setFont("Helvetica", 12)
+            pdf.drawString(50, y_position, f"Risk Category: {self.data.get('risk_category', 'N/A')}")
+            y_position -= 15
+            risk_data = self.data.get('risk_data', {})
+            pdf.drawString(50, y_position, f"Overall Risk Score: {risk_data.get('overall_risk_score', 0)}/100")
+            y_position -= 20
+            
+            # Suitability
+            investment_data = self.data.get('investment_data', {})
+            suitability = investment_data.get('suitability', {})
+            pdf.setFont("Helvetica-Bold", 14)
+            pdf.drawString(50, y_position, "Investment Suitability")
+            y_position -= 20
+            
+            pdf.setFont("Helvetica", 12)
+            pdf.drawString(50, y_position, f"Assessment: {suitability.get('suitability', 'Unknown')}")
+            y_position -= 20
+            
+            # Investment Recommendations
+            pdf.setFont("Helvetica-Bold", 14)
+            pdf.drawString(50, y_position, "Investment Recommendations")
+            y_position -= 20
+            
+            safe_inv = investment_data.get('safe_monthly_investment', 0)
+            pdf.setFont("Helvetica", 12)
+            pdf.drawString(50, y_position, f"Monthly Investment: ₹{safe_inv:,.2f}")
+            y_position -= 15
+            pdf.drawString(50, y_position, f"Annual Investment: ₹{safe_inv * 12:,.2f}")
+            y_position -= 15
+            pdf.drawString(50, y_position, f"Confidence Level: {investment_data.get('investment_confidence', 'Low')}")
+            y_position -= 20
+            
+            # Portfolio Allocation
+            pdf.setFont("Helvetica-Bold", 14)
+            pdf.drawString(50, y_position, "Portfolio Allocation")
+            y_position -= 20
+            
+            allocation = self.data.get('allocation', {})
+            for category, percentage in allocation.items():
+                amount = (percentage / 100) * safe_inv if safe_inv > 0 else 0
+                pdf.drawString(70, y_position, f"{category}: {percentage}% (₹{amount:,.2f}/month)")
+                y_position -= 15
+                if y_position < 50:  # New page if needed
+                    pdf.showPage()
+                    y_position = height - 50
+            
+            # Stock Recommendations
+            y_position -= 10
+            pdf.setFont("Helvetica-Bold", 14)
+            pdf.drawString(50, y_position, "Suggested Stocks")
+            y_position -= 20
+            
+            recommendations = self.data.get('recommendations', {})
+            stocks = recommendations.get('stocks', [])
+            
+            for i, stock in enumerate(stocks[:5]):  # Top 5 only
+                pdf.setFont("Helvetica", 10)
+                pdf.drawString(70, y_position, f"{i+1}. {stock.get('symbol', '')} - {stock.get('name', '')}")
+                y_position -= 12
+                if y_position < 50:
+                    pdf.showPage()
+                    y_position = height - 50
+            
+            # Disclaimer
+            y_position -= 20
+            pdf.setFont("Helvetica-Oblique", 9)
+            pdf.drawString(50, y_position, "Disclaimer: This report is for educational purposes only.")
+            y_position -= 12
+            pdf.drawString(50, y_position, "We are not SEBI-registered investment advisors. This is not financial advice.")
+            y_position -= 12
+            pdf.drawString(50, y_position, "Model Version: " + MODEL_VERSION)
+            
+            pdf.save()
+        else:
+            # Text-based report if ReportLab not available
+            report = self._generate_text_report()
+            buffer.write(report.encode('utf-8'))
+        
+        buffer.seek(0)
+        return buffer
+    
+    def _generate_text_report(self) -> str:
+        """Generate text report as fallback"""
+        answers = self.data['answers']
+        financial_data = self.data.get('financial_data', {})
+        risk_data = self.data.get('risk_data', {})
+        investment_data = self.data.get('investment_data', {})
+        allocation = self.data.get('allocation', {})
+        recommendations = self.data.get('recommendations', {})
+        
+        report = f"""
+        STOCK RISK ADVISOR - ASSESSMENT REPORT (v{MODEL_VERSION})
+        =========================================================
+        Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+        
+        METHODOLOGY SUMMARY
+        -------------------
+        • 14-question comprehensive assessment
+        • Four dimensions: Financial Stability, Risk Tolerance, 
+          Investment Horizon, Knowledge & Experience
+        • Age-appropriate portfolio allocation
+        • Suitability check before recommendations
+        
+        PERSONAL INFORMATION
+        --------------------
+        Income: {self._get_income_range(answers.get('q1', 3))}
+        Expenses: {self._get_expenses_range(answers.get('q2', 3))}
+        Age Group: {self._get_age_group(answers.get('q14', 4))}
+        
+        FINANCIAL HEALTH
+        ----------------
+        Financial Health Score: {financial_data.get('financial_score', 0)}/100
+        Emergency Fund: {self._get_emergency_status(answers.get('q3', 3))}
+        Debt Situation: {self._get_debt_status(answers.get('q4', 3))}
+        Savings Rate: {financial_data.get('savings_rate', 0):.1f}%
+        
+        RISK PROFILE
+        ------------
+        Risk Category: {self.data.get('risk_category', 'N/A')}
+        Overall Risk Score: {risk_data.get('overall_risk_score', 0)}/100
+        
+        INVESTMENT SUITABILITY
+        ----------------------
+        Assessment: {investment_data.get('suitability', {}).get('suitability', 'Unknown')}
+        {self._get_suitability_explanation(investment_data)}
+        
+        INVESTMENT RECOMMENDATIONS
+        --------------------------
+        Monthly Investment: ₹{investment_data.get('safe_monthly_investment', 0):,.2f}
+        Annual Investment: ₹{investment_data.get('annual_investment', 0):,.2f}
+        Confidence Level: {investment_data.get('investment_confidence', 'Low')}
+        
+        PORTFOLIO ALLOCATION
+        --------------------
+        """
+        
+        safe_inv = investment_data.get('safe_monthly_investment', 0)
+        for category, percentage in allocation.items():
+            amount = (percentage / 100) * safe_inv
+            report += f"{category}: {percentage}% (₹{amount:,.2f}/month)\n"
+        
+        report += """
+        
+        SUGGESTED STOCKS
+        ----------------
+        """
+        
+        stocks = recommendations.get('stocks', [])
+        for i, stock in enumerate(stocks[:5]):
+            report += f"{i+1}. {stock.get('symbol', '')} - {stock.get('name', '')} ({stock.get('sector', '')})\n"
+        
+        report += f"""
+        Strategy: {recommendations.get('strategy', 'Balanced Growth')}
+        
+        DISCLAIMER
+        ----------
+        This report is for educational purposes only.
+        We are not SEBI-registered investment advisors. This is not financial advice.
+        Model Version: {MODEL_VERSION}
+        """
+        
+        return report
+    
+    def _get_suitability_explanation(self, investment_data: Dict) -> str:
+        """Get suitability explanation"""
+        suitability = investment_data.get('suitability', {})
+        issues = suitability.get('blocking_issues', [])
+        warnings = suitability.get('warnings', [])
+        
+        explanation = ""
+        if issues:
+            explanation += "Blocking Issues:\n"
+            for issue in issues:
+                explanation += f"  • {issue}\n"
+        
+        if warnings:
+            explanation += "Warnings:\n"
+            for warning in warnings:
+                explanation += f"  • {warning}\n"
+        
+        return explanation
+    
+    @staticmethod
+    def _get_income_range(score: int) -> str:
+        ranges = {
+            1: "Less than ₹25,000",
+            2: "₹25,001 – ₹50,000",
+            3: "₹50,001 – ₹75,000",
+            4: "₹75,001 – ₹1,00,000",
+            5: "₹1,00,001 – ₹1,50,000",
+            6: "Above ₹1,50,000"
+        }
+        return ranges.get(score, "₹50,001 – ₹75,000")
+    
+    @staticmethod
+    def _get_expenses_range(score: int) -> str:
+        ranges = {
+            1: "Less than ₹20,000",
+            2: "₹20,001 – ₹35,000",
+            3: "₹35,001 – ₹50,000",
+            4: "₹50,001 – ₹75,000",
+            5: "₹75,001 – ₹1,00,000",
+            6: "Above ₹1,00,000"
+        }
+        return ranges.get(score, "₹35,001 – ₹50,000")
+    
+    @staticmethod
+    def _get_age_group(score: int) -> str:
+        groups = {
+            1: "Under 25 years",
+            2: "25-34 years",
+            3: "35-44 years",
+            4: "45-54 years",
+            5: "55-64 years",
+            6: "65+ years"
+        }
+        return groups.get(score, "35-44 years")
+    
+    @staticmethod
+    def _get_emergency_status(score: int) -> str:
+        status = {
+            1: "No emergency savings",
+            2: "Less than 1 month",
+            3: "1–3 months",
+            4: "4–6 months (Recommended minimum)",
+            5: "7–12 months",
+            6: "More than 12 months"
+        }
+        return status.get(score, "1–3 months")
+    
+    @staticmethod
+    def _get_debt_status(score: int) -> str:
+        status = {
+            1: "Only manageable asset debt",
+            2: "Some high-interest debt but manageable",
+            3: "Moderate debt load",
+            4: "High-interest debt concerns",
+            5: "Significant debt stress"
+        }
+        return status.get(score, "Moderate debt load")
+
+
+# ============================================================================
+# STREAMLIT APP
+# ============================================================================
+
+# Page Configuration
 st.set_page_config(
-    page_title=DEFAULT_PAGE_TITLE,
-    page_icon="📈",
+    page_title=APP_TITLE,
+    page_icon=APP_ICON,
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# -------------------------
-# CUSTOM CSS
-# -------------------------
+# Enhanced Custom CSS
 st.markdown("""
 <style>
-    .main-header { font-size: 2.2rem; color: #1E3A8A; font-weight: 700; margin-bottom: 1rem; }
-    .section-header { font-size: 1.6rem; color: #374151; font-weight: 600; margin-top: 1.5rem; margin-bottom: 1rem; }
-    .card { background-color: #F9FAFB; padding: 1rem; border-radius: 10px; border-left: 5px solid #3B82F6; margin-bottom: 1rem; }
-    .metric-card { background: linear-gradient(135deg,#667eea 0%,#764ba2 100%); color: white; padding: 1.25rem; border-radius: 10px; text-align: center; }
-    .risk-low { color: #10B981; } .risk-medium { color: #F59E0B; } .risk-high { color: #EF4444; }
-    .tab-content { padding: 1.5rem 0; }
-    .progress-bar { height: 10px; background-color: #E5E7EB; border-radius: 5px; margin: 10px 0; overflow: hidden; }
-    .progress-fill { height: 100%; border-radius: 5px; transition: width 0.5s ease; }
-    /* Scope button styling to forms only */
-    div[data-testid="stForm"] .stButton button { background-color: #3B82F6; color: white; font-weight: 600; border-radius: 8px; padding: 0.4rem 1rem; }
-    div[data-testid="stForm"] .stButton button:hover { background-color: #2563EB; }
-    /* Wizard navigation */
-    .wizard-step { padding: 0.75rem 1rem; border-radius: 8px; margin: 0.25rem 0; }
-    .wizard-step-active { background-color: #3B82F6; color: white; }
-    .wizard-step-completed { background-color: #10B981; color: white; }
-    .wizard-step-pending { background-color: #F3F4F6; color: #6B7280; }
-    /* Info boxes */
-    .info-box { background-color: #E0F2FE; border-left: 4px solid #0EA5E9; padding: 1rem; border-radius: 8px; margin: 1rem 0; }
-    .warning-box { background-color: #FEF3C7; border-left: 4px solid #F59E0B; padding: 1rem; border-radius: 8px; margin: 1rem 0; }
+    .main-header { font-size: 2.5rem; color: #1E3A8A; font-weight: 700; margin-bottom: 1rem; }
+    .section-header { font-size: 1.8rem; color: #374151; font-weight: 600; margin: 1.5rem 0 1rem 0; }
+    .card { 
+        background-color: white; 
+        padding: 1.5rem; 
+        border-radius: 10px; 
+        border-left: 5px solid #3B82F6; 
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .metric-card { 
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+        color: white; 
+        padding: 1.5rem; 
+        border-radius: 10px; 
+        text-align: center;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .progress-bar { 
+        height: 10px; 
+        background-color: #E5E7EB; 
+        border-radius: 5px; 
+        margin: 10px 0; 
+        overflow: hidden; 
+    }
+    .progress-fill { 
+        height: 100%; 
+        border-radius: 5px; 
+        transition: width 0.5s ease; 
+    }
+    .stButton > button { 
+        background-color: #3B82F6; 
+        color: white; 
+        font-weight: 600; 
+        border-radius: 8px; 
+        padding: 0.5rem 1rem; 
+        border: none;
+        width: 100%;
+    }
+    .stButton > button:hover { 
+        background-color: #2563EB; 
+        color: white;
+    }
+    .info-box { 
+        background-color: #E0F2FE; 
+        border-left: 4px solid #0EA5E9; 
+        padding: 1rem; 
+        border-radius: 8px; 
+        margin: 1rem 0;
+    }
+    .warning-box { 
+        background-color: #FEF3C7; 
+        border-left: 4px solid #F59E0B; 
+        padding: 1rem; 
+        border-radius: 8px; 
+        margin: 1rem 0;
+    }
+    .success-box { 
+        background-color: #D1FAE5; 
+        border-left: 4px solid #10B981; 
+        padding: 1rem; 
+        border-radius: 8px; 
+        margin: 1rem 0;
+    }
+    .danger-box { 
+        background-color: #FEE2E2; 
+        border-left: 4px solid #EF4444; 
+        padding: 1rem; 
+        border-radius: 8px; 
+        margin: 1rem 0;
+    }
+    .part-header {
+        background: linear-gradient(90deg, #3B82F6, #8B5CF6);
+        color: white;
+        padding: 1rem;
+        border-radius: 8px;
+        margin: 2rem 0 1rem 0;
+        font-size: 1.2rem;
+        font-weight: 600;
+    }
+    .tooltip-icon {
+        color: #6B7280;
+        cursor: help;
+        margin-left: 5px;
+    }
+    .question-explanation {
+        background-color: #F9FAFB;
+        padding: 0.75rem;
+        border-radius: 6px;
+        margin: 0.5rem 0;
+        border-left: 3px solid #D1D5DB;
+        font-size: 0.9rem;
+        color: #4B5563;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# -------------------------
-# SESSION STATE INIT
-# -------------------------
+# Initialize Session State
 def init_session_state():
-    if 'current_tab' not in st.session_state:
-        st.session_state.current_tab = "Welcome"
-    if 'answers' not in st.session_state:
-        st.session_state.answers = {}
-    if 'risk_scores' not in st.session_state:
-        st.session_state.risk_scores = None
-    if 'risk_category' not in st.session_state:
-        st.session_state.risk_category = None
-    if 'financial_health_score' not in st.session_state:
-        st.session_state.financial_health_score = None
-    if 'safe_investment' not in st.session_state:
-        st.session_state.safe_investment = None
-    if 'override_log' not in st.session_state:
-        st.session_state.override_log = []
-    if 'confidence_score' not in st.session_state:
-        st.session_state.confidence_score = None
-    if 'assessment_complete' not in st.session_state:
-        st.session_state.assessment_complete = False
-    if 'contradictions' not in st.session_state:
-        st.session_state.contradictions = 0
-    if 'allocation' not in st.session_state:
-        st.session_state.allocation = None
-    if 'pdf_generated' not in st.session_state:
-        st.session_state.pdf_generated = False
-    if 'assessment_id' not in st.session_state:
-        st.session_state.assessment_id = None
-    if 'assessment_step' not in st.session_state:
-        st.session_state.assessment_step = 0
-    if 'debt_details' not in st.session_state:
-        st.session_state.debt_details = {}
+    defaults = {
+        'current_tab': "Welcome",
+        'answers': {},
+        'risk_data': None,
+        'risk_category': None,
+        'financial_data': None,
+        'safe_investment': None,
+        'assessment_complete': False,
+        'allocation': None,
+        'recommendations': None,
+        'assessment_id': None,
+        'validation_warnings': []
+    }
+    
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
 init_session_state()
 
-# -------------------------
-# STOCK DATABASE
-# -------------------------
-STOCKS_DB = {
-    "Large Cap Blue Chip": [
-        {"symbol": "RELIANCE", "name": "Reliance Industries", "sector": "Energy", "market_cap": "Large"},
-        {"symbol": "TCS", "name": "Tata Consultancy Services", "sector": "IT", "market_cap": "Large"},
-        {"symbol": "HDFCBANK", "name": "HDFC Bank", "sector": "Banking", "market_cap": "Large"},
-        {"symbol": "INFY", "name": "Infosys", "sector": "IT", "market_cap": "Large"},
-        {"symbol": "ICICIBANK", "name": "ICICI Bank", "sector": "Banking", "market_cap": "Large"},
-        {"symbol": "HINDUNILVR", "name": "Hindustan Unilever", "sector": "FMCG", "market_cap": "Large"}
-    ],
-    "Mid Cap": [
-        {"symbol": "TITAN", "name": "Titan Company", "sector": "Consumer", "market_cap": "Mid"},
-        {"symbol": "MARUTI", "name": "Maruti Suzuki", "sector": "Auto", "market_cap": "Mid"},
-        {"symbol": "ASIANPAINT", "name": "Asian Paints", "sector": "Paints", "market_cap": "Mid"},
-        {"symbol": "BAJFINANCE", "name": "Bajaj Finance", "sector": "Financial", "market_cap": "Mid"},
-        {"symbol": "BHARTIARTL", "name": "Bharti Airtel", "sector": "Telecom", "market_cap": "Mid"}
-    ],
-    "Small Cap": [
-        {"symbol": "TATAELXSI", "name": "Tata Elxsi", "sector": "IT", "market_cap": "Small"},
-        {"symbol": "COFORGE", "name": "Coforge", "sector": "IT", "market_cap": "Small"},
-        {"symbol": "LAURUSLABS", "name": "Laurus Labs", "sector": "Pharma", "market_cap": "Small"},
-        {"symbol": "PERSISTENT", "name": "Persistent Systems", "sector": "IT", "market_cap": "Small"}
-    ],
-    "Growth Stocks": [
-        {"symbol": "DMART", "name": "Avenue Supermarts", "sector": "Retail", "market_cap": "Large"},
-        {"symbol": "BAJAJFINSV", "name": "Bajaj Finserv", "sector": "Financial", "market_cap": "Large"},
-        {"symbol": "TECHM", "name": "Tech Mahindra", "sector": "IT", "market_cap": "Large"},
-        {"symbol": "NAUKRI", "name": "Info Edge", "sector": "Internet", "market_cap": "Large"}
-    ]
-}
-
-# -------------------------
-# RISK CALCULATOR
-# -------------------------
-class RiskCalculator:
-    @staticmethod
-    def calculate_financial_health_score(answers):
-        """Calculate Financial Health Score (0-100)"""
-        monthly_income = float(answers.get('monthly_income', 0))
-        monthly_expenses = float(answers.get('monthly_expenses', 0))
-        emergency_score = int(answers.get('emergency', 3))
-        high_interest_debt = float(answers.get('high_interest_debt', 0))
-
-        # Basic metrics
-        disposable_income = max(0.0, monthly_income - monthly_expenses)
-        annual_income = monthly_income * 12.0
-
-        # Savings Rate Score (1-5)
-        savings_rate = (disposable_income / monthly_income) if monthly_income > 0 else 0.0
-        if savings_rate < 0.10:
-            savings_rate_score = 1
-        elif savings_rate < 0.20:
-            savings_rate_score = 2
-        elif savings_rate < 0.30:
-            savings_rate_score = 3
-        elif savings_rate < 0.40:
-            savings_rate_score = 4
-        else:
-            savings_rate_score = 5
-
-        # Debt Score (0-1)
-        if annual_income > 0:
-            debt_ratio = min(1.0, high_interest_debt / annual_income)
-        else:
-            debt_ratio = 1.0
-        debt_score = max(0.0, 1.0 - debt_ratio)
-
-        # Emergency component: map 1-5 → percentage
-        emergency_component = (emergency_score / 5.0) * 100.0
-        debt_component = debt_score * 100.0
-        savings_component = (savings_rate_score / 5.0) * 100.0
-
-        # Income stability: optional - currently assumed good; can be replaced with a user input later
-        income_stability_component = 100.0
-
-        financial_health_score = (
-            WEIGHTS['emergency'] * emergency_component +
-            WEIGHTS['debt'] * debt_component +
-            WEIGHTS['savings'] * savings_component +
-            WEIGHTS['income_stability'] * income_stability_component
-        )
-
-        return {
-            'financial_health_score': round(financial_health_score, 2),
-            'savings_rate_score': savings_rate_score,
-            'debt_score': round(debt_score, 2),
-            'disposable_income': round(disposable_income, 2),
-            'debt_ratio': round(debt_ratio, 2)
-        }
-
-    @staticmethod
-    def norm(score):
-        """Normalize 1-5 to 0.2-1.0"""
-        try:
-            return float(score) / 5.0
-        except Exception:
-            return 0.0
-
-    @staticmethod
-    def calculate_risk_scores(answers, financial_data):
-        """Calculate Risk Scores (90-point system)"""
-        # Inputs (with safe defaults)
-        age_score = int(answers.get('age', 3))
-        purpose_score = int(answers.get('purpose', 3))
-        horizon_score = int(answers.get('horizon', 3))
-        risk_behavior_score = int(answers.get('risk_behavior', 3))
-        experience_score = int(answers.get('experience', 3))
-        emergency_score = int(answers.get('emergency', 3))
-        goal_priority = int(answers.get('goal_priority', 2))
-        loss_capacity = int(answers.get('loss_capacity', 2))
-
-        # From financial_data
-        savings_rate_score = financial_data.get('savings_rate_score', 3)
-        debt_score = financial_data.get('debt_score', 0.5)
-
-        # Convert scales
-        goal_priority_normalized = ((goal_priority - 1) * 2) + 1  # 1-3 → 1-5
-        loss_capacity_normalized = ((loss_capacity - 1) * (4.0/3.0)) + 1  # 1-4 → 1-5
-
-        # RISK CAPACITY (40 points)
-        risk_capacity = (
-            8.0 * RiskCalculator.norm(age_score) +
-            6.0 * RiskCalculator.norm(savings_rate_score) +
-            6.0 * debt_score +
-            10.0 * RiskCalculator.norm(emergency_score) +
-            10.0 * RiskCalculator.norm(horizon_score)
-        )
-
-        # RISK TOLERANCE (30 points)
-        risk_tolerance = (
-            15.0 * RiskCalculator.norm(risk_behavior_score) +
-            10.0 * RiskCalculator.norm(experience_score) +
-            5.0 * RiskCalculator.norm(loss_capacity_normalized)
-        )
-
-        # RISK REQUIREMENT (20 points)
-        risk_requirement = (
-            15.0 * RiskCalculator.norm(purpose_score) +
-            5.0 * RiskCalculator.norm(goal_priority_normalized)
-        )
-
-        total_score = risk_capacity + risk_tolerance + risk_requirement
-
-        return {
-            'risk_capacity': round(risk_capacity, 2),
-            'risk_tolerance': round(risk_tolerance, 2),
-            'risk_requirement': round(risk_requirement, 2),
-            'total_score': round(total_score, 2)
-        }
-
-    @staticmethod
-    def get_risk_category(total_score):
-        """Determine initial risk category"""
-        if total_score <= 30:
-            return "VERY LOW RISK"
-        elif total_score <= 45:
-            return "LOW RISK"
-        elif total_score <= 60:
-            return "MEDIUM RISK"
-        elif total_score <= 75:
-            return "HIGH RISK"
-        else:
-            return "VERY HIGH RISK"
-
-    @staticmethod
-    def apply_safety_overrides(initial_category, answers, financial_data):
-        """Apply safety overrides and return category, log, allocation, contradictions"""
-        risk_index_map = {
-            "VERY LOW RISK": 1,
-            "LOW RISK": 2,
-            "MEDIUM RISK": 3,
-            "HIGH RISK": 4,
-            "VERY HIGH RISK": 5
-        }
-        current_index = risk_index_map.get(initial_category, 3)
-        override_log = []
-        contradictions = 0
-
-        # Get inputs (with safe defaults)
-        emergency_score = int(answers.get('emergency', 3))
-        high_interest_debt = float(answers.get('high_interest_debt', 0))
-        monthly_income = float(answers.get('monthly_income', 0))
-        goal_priority = int(answers.get('goal_priority', 2))
-        liquidity_need = int(answers.get('liquidity_need', 2))
-        age_score = int(answers.get('age', 3))
-        risk_behavior = int(answers.get('risk_behavior', 3))
-        horizon_score = int(answers.get('horizon', 3))
-        experience_score = int(answers.get('experience', 3))
-        purpose_score = int(answers.get('purpose', 3))
-
-        # Override: Financial Health (emergency or debt)
-        if emergency_score < 3 or high_interest_debt > 0:
-            current_index = max(1, current_index - 1)
-            override_log.append("Financial health: Emergency fund < 3 months OR high-interest debt present")
-
-        # Override: Goal Priority
-        if goal_priority == 1:  # Critical
-            current_index = max(1, current_index - 2)
-            override_log.append("Goal priority: Critical goal → Downgrade 2 levels")
-        elif goal_priority == 2:  # Important
-            current_index = max(1, current_index - 1)
-            override_log.append("Goal priority: Important goal → Downgrade 1 level")
-
-        # Override: Liquidity Need (High liquidity need caps at MEDIUM)
-        if liquidity_need == 1:
-            current_index = min(current_index, 3)
-            override_log.append("Liquidity: High need → Cap at MEDIUM RISK")
-
-        # Consistency contradictions
-        if risk_behavior >= 4 and emergency_score <= 2:
-            contradictions += 1
-        if risk_behavior >= 4 and horizon_score <= 2:
-            contradictions += 1
-        if risk_behavior >= 4 and experience_score <= 2:
-            contradictions += 1
-        if purpose_score == 5 and monthly_income < 50000:
-            contradictions += 1
-
-        if contradictions >= 2:
-            current_index = max(1, current_index - 1)
-            override_log.append(f"Consistency: {contradictions} contradictions found")
-
-        # Age-Equity check
-        age_map = {1: 60, 2: 50, 3: 40, 4: 30, 5: 22}
-        user_age = age_map.get(age_score, 40)
-        reference_equity = 100 - user_age
-        equity_map = {1: 20, 2: 40, 3: 60, 4: 80, 5: 90}
-        current_equity = equity_map.get(current_index, 60)
-        if current_equity > (reference_equity + 15):
-            current_index = max(1, current_index - 1)
-            override_log.append(f"Age-Equity: Too aggressive for age {user_age}")
-
-        # Portfolio concentration (based on index)
-        allocation_table = {
-            1: {"Large_Cap": 85, "Mid_Cap": 15, "Small_Cap": 0, "Growth": 0},
-            2: {"Large_Cap": 70, "Mid_Cap": 25, "Small_Cap": 0, "Growth": 5},
-            3: {"Large_Cap": 50, "Mid_Cap": 30, "Small_Cap": 10, "Growth": 10},
-            4: {"Large_Cap": 35, "Mid_Cap": 30, "Small_Cap": 15, "Growth": 20},
-            5: {"Large_Cap": 20, "Mid_Cap": 25, "Small_Cap": 25, "Growth": 30}
-        }
-        allocation = allocation_table.get(current_index, allocation_table[3])
-
-        aggressive_exposure = allocation.get("Small_Cap", 0) + allocation.get("Growth", 0)
-        if aggressive_exposure > 45:
-            current_index = max(1, current_index - 1)
-            override_log.append(f"Concentration: Aggressive exposure {aggressive_exposure}% > 45%")
-
-        # Low income cap
-        if monthly_income < 25000:
-            current_index = min(current_index, 3)
-            override_log.append("Income: Monthly income < ₹25,000 → Cap at MEDIUM RISK")
-
-        # Final bounds
-        current_index = max(1, min(5, current_index))
-        reverse_map = {1: "VERY LOW RISK", 2: "LOW RISK", 3: "MEDIUM RISK", 4: "HIGH RISK", 5: "VERY HIGH RISK"}
-        final_category = reverse_map.get(current_index, "MEDIUM RISK")
-
-        return final_category, override_log, allocation, contradictions
-
-    @staticmethod
-    def calculate_safe_investment(answers, financial_data):
-        """Calculate safe monthly investment amount"""
-        monthly_income = float(answers.get('monthly_income', 0))
-        monthly_expenses = float(answers.get('monthly_expenses', 0))
-        emergency_score = int(answers.get('emergency', 3))
-        high_interest_debt = float(answers.get('high_interest_debt', 0))
-        financial_health_score = float(financial_data.get('financial_health_score', 0))
-
-        # Map emergency to months
-        emergency_months_map = {1: 0, 2: 1, 3: 2, 4: 4.5, 5: 8}
-        current_ef_months = emergency_months_map.get(emergency_score, 0)
-        required_ef_months = 6
-        ef_gap_months = max(0.0, required_ef_months - current_ef_months)
-        ef_gap_amount = ef_gap_months * monthly_expenses
-
-        disposable_income = financial_data.get('disposable_income', 0.0)
-
-        if ef_gap_amount > 0 and disposable_income > 0:
-            build_timeline = 12
-            if (ef_gap_amount / build_timeline) > (disposable_income * 0.4):
-                build_timeline = max(3, int(np.ceil(ef_gap_amount / (disposable_income * 0.4))))
-            build_timeline = min(24, build_timeline)
-            monthly_ef_saving = ef_gap_amount / build_timeline
-        else:
-            monthly_ef_saving = 0.0
-            build_timeline = 0
-
-        # Debt payment (minimum)
-        if high_interest_debt > 0:
-            monthly_debt_payment = high_interest_debt * 0.03
-        else:
-            monthly_debt_payment = 0.0
-
-        # Investment bracket based on financial health
-        if financial_health_score < 50:
-            max_investment_rate = 0.10
-        elif financial_health_score < 70:
-            max_investment_rate = 0.20
-        elif financial_health_score < 85:
-            max_investment_rate = 0.30
-        else:
-            max_investment_rate = 0.40
-
-        available_after_priorities = max(0.0, disposable_income - monthly_ef_saving - monthly_debt_payment)
-        investment_limit = disposable_income * max_investment_rate
-        safe_monthly_investment = min(available_after_priorities, investment_limit)
-
-        if safe_monthly_investment < MINIMUM_INVESTMENT_THRESHOLD:
-            safe_monthly_investment = 0.0
-
-        return {
-            'safe_monthly_investment': round(safe_monthly_investment, 2),
-            'annual_investment': round(safe_monthly_investment * 12.0, 2),
-            'monthly_ef_saving': round(monthly_ef_saving, 2),
-            'monthly_debt_payment': round(monthly_debt_payment, 2),
-            'ef_build_timeline': build_timeline,
-            'ef_gap_amount': round(ef_gap_amount, 2),
-            'investment_tier': max_investment_rate * 100.0
-        }
-
-    @staticmethod
-    def calculate_confidence_score(financial_health_score, override_log, safe_investment, contradictions):
-        """Calculate confidence score 40-90 (normalized to 0-100 for display consistency)"""
-        penalties = []
-        if financial_health_score < 50:
-            penalties.append("Low financial health")
-        if len(override_log) >= 3:
-            penalties.append("Multiple overrides")
-        if contradictions >= 2:
-            penalties.append("Contradictory answers")
-        if safe_investment < LOW_INVESTMENT_CONFIDENCE_THRESH:
-            penalties.append("Low investment capacity")
-
-        base_confidence = 90
-        penalty_per_item = 10
-        confidence_score = max(40, base_confidence - (len(penalties) * penalty_per_item))
-
-        # Normalize to 0-100 for UI (scale up so 90->90, floor 40->40)
-        normalized_score = confidence_score
-
-        if normalized_score >= 80:
-            level = "HIGH"
-        elif normalized_score >= 60:
-            level = "MEDIUM"
-        else:
-            level = "LOW"
-
-        return {'score': int(normalized_score), 'level': level, 'penalties': penalties}
-
-# -------------------------
-# HELPER FUNCTIONS
-# -------------------------
-def create_navigation_buttons():
-    """Create Next/Previous buttons for navigation"""
-    tabs = ["Welcome", "Assessment", "Financial Health", "Risk Profile", "Recommendations", "Action Plan", "Data & Export"]
-    current_tab = st.session_state.current_tab
-    current_index = tabs.index(current_tab) if current_tab in tabs else 0
-    
-    col1, col2, col3 = st.columns([1, 2, 1])
-    
-    with col1:
-        # Previous button
-        if current_index > 0 and current_tab != "Welcome":
-            prev_tab = tabs[current_index - 1]
-            if st.button("◀️ Previous", use_container_width=True):
-                st.session_state.current_tab = prev_tab
-                st.rerun()
-    
-    with col3:
-        # Next button
-        if current_index < len(tabs) - 1 and current_tab != "Data & Export":
-            if current_tab == "Assessment" and not st.session_state.assessment_complete:
-                if st.button("Calculate Results ▶️", type="primary", use_container_width=True):
-                    calculate_results()
-            else:
-                next_tab = tabs[current_index + 1]
-                if st.button("Next ▶️", type="primary", use_container_width=True):
-                    st.session_state.current_tab = next_tab
-                    st.rerun()
-
-def create_progress_bar():
-    """Create progress bar at top of page"""
-    tabs = ["Welcome", "Assessment", "Financial Health", "Risk Profile", "Recommendations", "Action Plan", "Data & Export"]
-    current_tab = st.session_state.current_tab
-    current_index = tabs.index(current_tab) if current_tab in tabs else 0
-    
-    progress_html = f"""
-    <div style="margin-bottom: 1.5rem;">
-        <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem; font-size: 0.9rem;">
-            {"".join([f'<span style="font-weight: {"bold" if i == current_index else "normal"}; color: {"#3B82F6" if i == current_index else "#6B7280"};">{tab}</span>' for i, tab in enumerate(tabs)])}
-        </div>
-        <div class="progress-bar">
-            <div class="progress-fill" style="width: {(current_index + 1)/len(tabs)*100}%; background-color: #3B82F6;"></div>
-        </div>
-    </div>
-    """
-    st.markdown(progress_html, unsafe_allow_html=True)
+# ============================================================================
+# HELPER FUNCTIONS WITH ENHANCED UI
+# ============================================================================
 
 def calculate_results():
-    """Calculate all results from assessment"""
+    """Calculate all assessment results with validation"""
     calculator = RiskCalculator()
     
-    # Financial Health Score
-    financial_data = calculator.calculate_financial_health_score(st.session_state.answers)
-    st.session_state.financial_health_score = financial_data
-
-    # Risk Scores
-    risk_scores = calculator.calculate_risk_scores(st.session_state.answers, financial_data)
-    st.session_state.risk_scores = risk_scores
-
-    # Risk Category with overrides
-    initial_category = calculator.get_risk_category(risk_scores['total_score'])
-    final_category, override_log, allocation, contradictions = calculator.apply_safety_overrides(
-        initial_category, st.session_state.answers, financial_data
+    # Validate answers first
+    is_valid, warnings = calculator.validate_answers(st.session_state.answers)
+    
+    if warnings:
+        st.session_state.validation_warnings = warnings
+    
+    if not is_valid:
+        st.error("Please complete all questions before calculating results.")
+        return
+    
+    # Calculate scores
+    risk_data = calculator.calculate_overall_risk_score(st.session_state.answers)
+    financial_data = risk_data['financial_data']
+    risk_category = calculator.get_risk_category(risk_data['overall_risk_score'])
+    
+    # Check suitability
+    suitability = calculator.check_investment_suitability(st.session_state.answers, financial_data)
+    
+    # Determine portfolio allocation
+    allocation = calculator.determine_portfolio_allocation(
+        risk_data['overall_risk_score'], st.session_state.answers
     )
-    st.session_state.risk_category = final_category
-    st.session_state.override_log = override_log
+    
+    # Calculate safe investment
+    investment_data = calculator.calculate_safe_investment(
+        st.session_state.answers, financial_data, risk_data
+    )
+    
+    # Get stock recommendations
+    recommendations = calculator.get_stock_recommendations(risk_category, allocation)
+    
+    # Update session state
+    st.session_state.financial_data = financial_data
+    st.session_state.risk_data = risk_data
+    st.session_state.risk_category = risk_category
     st.session_state.allocation = allocation
-    st.session_state.contradictions = contradictions
-
-    # Investment Data
-    investment_data = calculator.calculate_safe_investment(st.session_state.answers, financial_data)
     st.session_state.safe_investment = investment_data
-
-    # Confidence Score
-    confidence_data = calculator.calculate_confidence_score(
-        financial_data['financial_health_score'],
-        override_log,
-        investment_data['safe_monthly_investment'],
-        contradictions
-    )
-    st.session_state.confidence_score = confidence_data
-
+    st.session_state.recommendations = recommendations
     st.session_state.assessment_complete = True
     st.session_state.assessment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    st.session_state.current_tab = "Financial Health"
     
     # Save to CSV
     assessment_data = {
         'answers': st.session_state.answers,
         'financial_data': financial_data,
-        'risk_scores': risk_scores,
-        'risk_category': final_category,
-        'override_log': override_log,
+        'risk_data': risk_data,
+        'risk_category': risk_category,
         'allocation': allocation,
-        'contradictions': contradictions,
         'investment_data': investment_data,
-        'confidence_score': confidence_data
+        'recommendations': recommendations
     }
     
     if CSVDataHandler.save_assessment_to_csv(assessment_data):
         st.success("✅ Assessment saved successfully!")
     
-    # Navigate to next tab
-    st.session_state.current_tab = "Financial Health"
     st.rerun()
 
-# -------------------------
-# Welcome Tab
-# -------------------------
-def create_welcome_tab():
-    st.markdown('<h1 class="main-header">📈 Welcome to Stock Risk Advisor!</h1>', unsafe_allow_html=True)
+
+def create_question_with_explanation(question_num, title, options, format_func, 
+                                     help_text, example=None, key=None):
+    """Create standardized question with explanation box"""
+    st.markdown(f"#### Q{question_num}: {title}")
     
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.markdown("""
-        ## Your Personalized Stock Investment Guide
-        
-        This tool helps you:
-        
-        ✅ **Assess** your financial readiness for stock investing  
-        ✅ **Understand** your risk tolerance for different stock types  
-        ✅ **Get personalized** stock recommendations  
-        ✅ **Create a safe** investment plan with proper allocations  
-        ✅ **Track** your financial progress over time  
-        
-        **What you'll get after completing the assessment:**
-        
-        1. **Financial Health Score** - How ready you are to invest  
-        2. **Risk Profile** - Your investment risk category  
-        3. **Stock Allocation** - Large/Mid/Small cap percentages  
-        4. **Specific Stock Suggestions** - Examples matching your profile  
-        5. **Action Plan** - Step-by-step implementation guide  
-        
-        **Time required:** ~5-7 minutes
-        """)
+    # Help text in expander
+    with st.expander("ℹ️ Why we ask this & how to answer"):
+        st.markdown(help_text)
+        if example:
+            st.markdown(f"**Example:** {example}")
     
-    with col2:
-        st.image("https://img.icons8.com/color/300/000000/stock-exchange.png", width=250)
+    # Create selectbox
+    return st.selectbox(
+        f"Select your {title.lower()}:",
+        options=options,
+        format_func=format_func,
+        index=st.session_state.answers.get(key, 3) - 1 if key in st.session_state.answers else 2,
+        key=key
+    )
+
+
+def show_section_explanation(title, description, key_points=None):
+    """Show section explanation box"""
+    st.markdown(f"""
+    <div class="info-box">
+        <strong>📋 {title}</strong><br>
+        {description}
+    </div>
+    """, unsafe_allow_html=True)
     
-    st.markdown("---")
-    st.markdown("### 🚀 Ready to Start?")
+    if key_points:
+        st.markdown("**Key points to consider:**")
+        for point in key_points:
+            st.markdown(f"• {point}")
+
+
+def create_navigation_buttons():
+    """Create navigation buttons"""
+    tabs = ["Welcome", "Assessment", "Financial Health", "Risk Profile", 
+            "Recommendations", "Action Plan", "Data & Export"]
+    current = st.session_state.current_tab
+    idx = tabs.index(current) if current in tabs else 0
     
     col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        if st.button("▶️ Begin Assessment", type="primary", use_container_width=True):
-            st.session_state.current_tab = "Assessment"
-            st.rerun()
     
-    st.markdown("---")
-    st.markdown("""
-    ### 📋 What to Expect
+    with col1:
+        if idx > 0 and current != "Welcome":
+            if st.button("◀️ Previous", use_container_width=True):
+                st.session_state.current_tab = tabs[idx - 1]
+                st.rerun()
     
-    **Step 1: Financial Assessment**  
-    Basic questions about your income, expenses, and debt
-    
-    **Step 2: Risk Assessment**  
-    Understanding your comfort with market volatility
-    
-    **Step 3: Investment Goals**  
-    What you want to achieve with your investments
-    
-    **Step 4: Personalized Recommendations**  
-    Stock suggestions and allocation percentages
-    
-    **Step 5: Action Plan**  
-    Implementation timeline and monthly checklist
-    """)
+    with col3:
+        if idx < len(tabs) - 1 and current != "Data & Export":
+            if current == "Assessment" and not st.session_state.assessment_complete:
+                if st.button("Calculate Results ▶️", type="primary", use_container_width=True):
+                    calculate_results()
+            else:
+                if st.button("Next ▶️", type="primary", use_container_width=True):
+                    st.session_state.current_tab = tabs[idx + 1]
+                    st.rerun()
 
-# -------------------------
-# Assessment Tab (UPDATED)
-# -------------------------
-def create_assessment_tab():
-    st.markdown('<h1 class="main-header">📋 Stock Investment Readiness Assessment</h1>', unsafe_allow_html=True)
+
+def create_progress_bar():
+    """Create progress bar"""
+    tabs = ["Welcome", "Assessment", "Financial Health", "Risk Profile", 
+            "Recommendations", "Action Plan", "Data & Export"]
+    current = st.session_state.current_tab
+    idx = tabs.index(current) if current in tabs else 0
     
-    st.markdown("""
-    <div class="info-box">
-        <strong>📊 What you'll receive:</strong> Financial Health Score + Risk Profile + Stock Recommendations + Action Plan
-    </div>
-    """, unsafe_allow_html=True)
+    # Create tab labels
+    tab_labels = []
+    for i, tab in enumerate(tabs):
+        if i == idx:
+            tab_labels.append(f'<span style="font-weight: bold; color: #3B82F6;">{tab}</span>')
+        else:
+            tab_labels.append(f'<span style="font-weight: normal; color: #6B7280;">{tab}</span>')
     
-    # Progress indicator
-    answered = len([k for k in st.session_state.answers.keys() if st.session_state.answers[k] not in [None, '']])
-    progress_pct = min(100, int((answered / 12) * 100)) if answered > 0 else 0
-    st.markdown(f"""
-    <div style="margin: 1rem 0;">
-        <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
-            <span>Assessment Progress</span>
-            <span>{answered}/12 questions answered</span>
+    progress_html = f"""
+    <div style="margin-bottom: 2rem;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+            {"".join(tab_labels)}
         </div>
         <div class="progress-bar">
-            <div class="progress-fill" style="width: {progress_pct}%; background-color: #3B82F6;"></div>
+            <div class="progress-fill" style="width: {(idx + 1)/len(tabs)*100}%; 
+                 background-color: #3B82F6;"></div>
+        </div>
+    </div>
+    """
+    st.markdown(progress_html, unsafe_allow_html=True)
+
+
+def show_calculation_methodology():
+    """Show how recommendations were calculated"""
+    with st.expander("🔬 How we calculated your results", expanded=False):
+        st.markdown("""
+        ### Assessment Methodology (v2.1)
+        
+        Your recommendations are based on a **multi-dimensional assessment** across four key areas:
+        
+        #### 1. Financial Stability (30% weight)
+        - Emergency Fund Status (40%)
+        - Debt Situation (35%)
+        - Savings Rate (25%)
+        
+        #### 2. Risk Tolerance (30% weight)
+        - Importance of Avoiding Loss (30%)
+        - Emotional Reaction to Market Drops (25%)
+        - Maximum Tolerable Loss (30%)
+        - View on Market Volatility (15%)
+        
+        #### 3. Investment Horizon (20% weight)
+        - Primary Investment Goal (40%)
+        - Timeframe Length (40%)
+        - Liquidity Needs (20%)
+        
+        #### 4. Knowledge & Experience (20% weight)
+        - Stock Investing Experience (60%)
+        - Knowledge Level (40%)
+        
+        #### Portfolio Allocation Logic
+        - **Age-Adjusted**: Younger investors get higher equity allocation
+        - **Risk-Adjusted**: Higher risk tolerance increases growth allocation
+        - **Suitability Check**: Emergency fund and debt are checked first
+        
+        #### Investment Amount Calculation
+        - **Base**: Percentage of disposable income
+        - **Adjusted by**: Financial health, risk tolerance, timeframe
+        - **Capped at**: 30% of available funds
+        - **Minimum**: ₹500/month threshold
+        
+        #### Model Features
+        - No double-counting of factors
+        - Realistic Indian income/expense ranges
+        - Suitability checks before recommendations
+        - Transparent weighting system
+        """)
+        
+        # Show actual weights if available
+        if st.session_state.risk_data:
+            st.markdown(f"""
+            #### Your Actual Weights Used
+            - Financial Stability: **{WEIGHTS['financial_stability']*100}%**
+            - Risk Tolerance: **{WEIGHTS['risk_tolerance']*100}%**
+            - Investment Horizon: **{WEIGHTS['investment_horizon']*100}%**
+            - Knowledge & Experience: **{WEIGHTS['knowledge_experience']*100}%**
+            
+            **Model Version:** {MODEL_VERSION}
+            """)
+
+# ============================================================================
+# TAB FUNCTIONS WITH ENHANCED UI
+# ============================================================================
+
+def create_assessment_tab():
+    """Create the assessment tab with enhanced UI and explanations"""
+    st.markdown('<h1 class="main-header">📋 Comprehensive Stock Investment Assessment</h1>', unsafe_allow_html=True)
+    
+    # Progress indicator
+    answered = len([v for v in st.session_state.answers.values() if v is not None])
+    progress = min(100, int((answered / 14) * 100))
+    
+    st.markdown(f"""
+    <div style="margin: 1.5rem 0;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+            <span>Assessment Progress</span>
+            <span>{answered}/14 questions answered</span>
+        </div>
+        <div class="progress-bar">
+            <div class="progress-fill" style="width: {progress}%;"></div>
         </div>
     </div>
     """, unsafe_allow_html=True)
     
+    # Show validation warnings if any
+    if st.session_state.validation_warnings:
+        for warning in st.session_state.validation_warnings:
+            st.warning(warning)
+    
     with st.form("assessment_form"):
-        st.markdown("### 💰 Basic Financial Information")
+        # Part 1: Financial Foundation
+        st.markdown('<div class="part-header">🟦 PART 1: FINANCIAL FOUNDATION</div>', unsafe_allow_html=True)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            monthly_income = st.number_input(
-                "1. What is your monthly take-home income? (₹)",
-                min_value=0.0, max_value=10_000_000.0, value=float(st.session_state.answers.get('monthly_income', 50000.0)),
-                step=500.0, 
-                help="Your monthly income after taxes and deductions"
-            )
-            monthly_expenses = st.number_input(
-                "2. What are your monthly essential expenses? (₹)",
-                min_value=0.0, max_value=10_000_000.0, value=float(st.session_state.answers.get('monthly_expenses', 30000.0)),
-                step=500.0,
-                help="Rent, food, bills, insurance, minimum debt payments"
-            )
-        
-        with col2:
-            emergency = st.selectbox(
-                "3. Emergency fund status?",
-                options=[1, 2, 3, 4, 5],
-                format_func=lambda x: {
-                    1: "❌ No emergency fund",
-                    2: "⚠️ 1 month of expenses saved",
-                    3: "🟡 1-3 months of expenses saved",
-                    4: "🟢 3-6 months of expenses saved",
-                    5: "✅ 6+ months of expenses saved"
-                }[x],
-                index=int(st.session_state.answers.get('emergency', 3)) - 1,
-                help="Recommended: 3-6 months of expenses"
-            )
-            
-            age = st.selectbox(
-                "4. What is your age group?",
-                options=[1, 2, 3, 4, 5],
-                format_func=lambda x: {
-                    1: "56-65+ years",
-                    2: "46-55 years",
-                    3: "36-45 years",
-                    4: "25-35 years",
-                    5: "Under 25 years"
-                }[x],
-                index=int(st.session_state.answers.get('age', 3)) - 1
-            )
-        
-        st.markdown("---")
-        st.markdown("### 💳 Debt Information")
-        
-        st.markdown("""
-        <div class="warning-box">
-            <strong>💡 Debt Management Tip:</strong> High-interest debt (credit cards > 12%) should be paid before aggressive stock investing.
-        </div>
-        """, unsafe_allow_html=True)
-        
-        high_interest_debt = st.number_input(
-            "5. Total high-interest debt amount (₹)",
-            min_value=0.0, max_value=100_000_000.0, 
-            value=float(st.session_state.answers.get('high_interest_debt', 0.0)),
-            step=1000.0,
-            help="Credit cards, personal loans >12% interest"
+        show_section_explanation(
+            "Financial Foundation Assessment",
+            "This section evaluates your basic financial health before considering stock investments. "
+            "We check if you have sufficient emergency funds, manageable debt, and positive cash flow.",
+            [
+                "Emergency fund should cover 3-6 months of expenses",
+                "High-interest debt should be prioritized over investing",
+                "Positive savings rate enables investment"
+            ]
         )
         
-        # Debt type breakdown (optional)
-        with st.expander("📝 Break down your debt (optional)"):
-            col1, col2 = st.columns(2)
-            with col1:
-                credit_card_debt = st.number_input("Credit Card Debt (₹)", min_value=0.0, step=1000.0)
-                personal_loan = st.number_input("Personal Loan (₹)", min_value=0.0, step=1000.0)
-            with col2:
-                car_loan = st.number_input("Car Loan (₹)", min_value=0.0, step=1000.0)
-                other_debt = st.number_input("Other High-Interest Debt (₹)", min_value=0.0, step=1000.0)
-        
-        st.markdown("---")
-        st.markdown("### 🎯 Investment Goals & Risk Assessment")
-        
         col1, col2 = st.columns(2)
         with col1:
-            purpose = st.selectbox(
-                "6. Primary investment purpose?",
-                options=[1, 2, 3, 4, 5],
-                format_func=lambda x: {
-                    1: "💰 Capital preservation",
-                    2: "📈 Regular income generation",
-                    3: "🎓 Education/Tax saving",
-                    4: "🏠 Retirement planning",
-                    5: "🚀 Wealth creation/Growth"
-                }[x],
-                index=int(st.session_state.answers.get('purpose', 4)) - 1
-            )
-            
-            horizon = st.selectbox(
-                "7. Investment time horizon?",
-                options=[1, 2, 3, 4, 5],
-                format_func=lambda x: {
-                    1: "Less than 2 years",
-                    2: "2-4 years",
-                    3: "5-7 years",
-                    4: "8-12 years",
-                    5: "13+ years"
-                }[x],
-                index=int(st.session_state.answers.get('horizon', 3)) - 1
+            q1 = create_question_with_explanation(
+                1, "Monthly Take-home Income",
+                options=[1, 2, 3, 4, 5, 6],
+                format_func=lambda x: [
+                    "Less than ₹25,000",
+                    "₹25,001 – ₹50,000",
+                    "₹50,001 – ₹75,000",
+                    "₹75,001 – ₹1,00,000",
+                    "₹1,00,001 – ₹1,50,000",
+                    "Above ₹1,50,000"
+                ][x-1],
+                help_text="Your monthly income after all deductions (tax, PF, EMI). "
+                        "This helps determine how much you can safely invest without affecting essential expenses.",
+                example="If your take-home salary is ₹68,000, choose ₹50,001 – ₹75,000",
+                key="q1_form"
             )
         
         with col2:
-            experience = st.selectbox(
-                "8. Investment experience level?",
-                options=[1, 2, 3, 4, 5],
-                format_func=lambda x: {
-                    1: "👶 No experience (first time investor)",
-                    2: "👶 Beginner (FDs, basic mutual funds)",
-                    3: "👤 Intermediate (stocks, some diversification)",
-                    4: "👨‍💼 Advanced (multiple asset classes)",
-                    5: "👨‍🎓 Expert (professional/sophisticated)"
-                }[x],
-                index=int(st.session_state.answers.get('experience', 2)) - 1
+            q2 = create_question_with_explanation(
+                2, "Monthly Essential Expenses",
+                options=[1, 2, 3, 4, 5, 6],
+                format_func=lambda x: [
+                    "Less than ₹20,000",
+                    "₹20,001 – ₹35,000",
+                    "₹35,001 – ₹50,000",
+                    "₹50,001 – ₹75,000",
+                    "₹75,001 – ₹1,00,000",
+                    "Above ₹1,00,000"
+                ][x-1],
+                help_text="Your monthly essential living expenses (rent, food, utilities, EMIs, insurance). "
+                        "Do NOT include investments, savings, or discretionary spending.",
+                example="If rent (₹15,000) + food (₹8,000) + bills (₹5,000) = ₹28,000, choose ₹20,001 – ₹35,000",
+                key="q2_form"
             )
-            
-            goal_priority = st.selectbox(
-                "9. How critical is your investment goal?",
-                options=[1, 2, 3],
-                format_func=lambda x: {
-                    1: "🔴 Critical (health/education - cannot fail)",
-                    2: "🟡 Important (wedding/house - should not fail)",
-                    3: "🟢 Flexible (wealth building - can adjust)"
-                }[x],
-                index=int(st.session_state.answers.get('goal_priority', 2)) - 1
-            )
-        
-        st.markdown("---")
-        st.markdown("### 📊 Risk Tolerance Assessment")
-        
-        with st.expander("ℹ️ Why we ask about risk in different ways", expanded=False):
-            st.markdown("""
-            **We measure risk in two dimensions:**
-            
-            1. **Psychological Tolerance**: How market volatility makes you *feel*
-            - Measured by: "How would you react if your portfolio dropped 20%?"
-            
-            2. **Financial Capacity**: How much loss you can *afford*
-            - Measured by: "Maximum % you could afford to lose?"
-            
-            ⚠️ **Example:** Someone might be emotionally comfortable with risk but have limited financial capacity.
-            We'll balance both factors for your personalized plan.
-            """)
         
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**10. Emotional Response to Market Drops**")
-            risk_behavior = st.select_slider(
-                "If your stocks dropped 20% tomorrow, you would:",
-                options=[1, 2, 3, 4, 5],
-                value=int(st.session_state.answers.get('risk_behavior', 3)),
-                format_func=lambda x: {
-                    1: "🚨 Panic & Sell",
-                    2: "😟 Worry but Hold",
-                    3: "😐 Stay Calm",
-                    4: "😊 See Opportunity",
-                    5: "🚀 Buy More!"
-                }[x]
+            q3 = create_question_with_explanation(
+                3, "Emergency Fund Coverage",
+                options=[1, 2, 3, 4, 5, 6],
+                format_func=lambda x: [
+                    "No emergency savings",
+                    "Less than 1 month of expenses",
+                    "1–3 months of expenses",
+                    "4–6 months (Recommended minimum)",
+                    "7–12 months of expenses",
+                    "More than 12 months"
+                ][x-1],
+                help_text="Emergency fund is cash savings for unexpected expenses (medical, job loss, repairs). "
+                        "This is CRITICAL before investing in stocks.",
+                example="If monthly expenses are ₹40,000 and you have ₹2 lakh saved, you have 5 months coverage",
+                key="q3_form"
             )
         
         with col2:
-            st.markdown("**11. Financial Capacity for Loss**")
-            loss_capacity = st.select_slider(
-                "Maximum % you could afford to lose in a bad year:",
-                options=[1, 2, 3, 4],
-                value=int(st.session_state.answers.get('loss_capacity', 2)),
-                format_func=lambda x: {
-                    1: "0-10% (Conservative)",
-                    2: "11-20% (Moderate)",
-                    3: "21-30% (Aggressive)",
-                    4: "31%+ (Very Aggressive)"
-                }[x]
+            q4 = create_question_with_explanation(
+                4, "Debt Situation",
+                options=[1, 2, 3, 4, 5],
+                format_func=lambda x: [
+                    "Only manageable asset debt",
+                    "Some high-interest debt but manageable",
+                    "Moderate debt load",
+                    "High-interest debt concerns",
+                    "Significant debt stress"
+                ][x-1],
+                help_text="High-interest debt (credit cards, personal loans >12%) should be paid before stock investing. "
+                        "Low-interest debt (home loan <9%) is usually manageable.",
+                example="Credit card debt at 24% interest is high-priority; home loan at 8.5% is lower priority",
+                key="q4_form"
             )
         
-        liquidity_need = st.selectbox(
-            "12. Do you expect to need this money suddenly?",
-            options=[1, 2, 3],
-            format_func=lambda x: {
-                1: "⚠️ High (may need within 1 year)",
-                2: "🟡 Medium (2-3 years)",
-                3: "🟢 Low (>3 years)"
-            }[x],
-            index=int(st.session_state.answers.get('liquidity_need', 2)) - 1,
-            help="Affects liquidity of recommended investments"
+        # Validation check for income vs expenses
+        if INCOME_MAP.get(q1, 0) < EXPENSES_MAP.get(q2, 0) * 0.9:
+            st.warning("⚠️ Your expenses seem high relative to income. Please double-check your entries.")
+        
+        # Part 2: Goals & Timeframe
+        st.markdown('<div class="part-header">🟦 PART 2: INVESTMENT GOALS & TIMEFRAME</div>', unsafe_allow_html=True)
+        
+        show_section_explanation(
+            "Investment Goals & Timeframe",
+            "Understanding your investment purpose and timeline helps recommend appropriate strategies. "
+            "Different goals require different risk levels and time horizons.",
+            [
+                "Short-term goals (<3 years) need safer investments",
+                "Long-term goals (>7 years) can tolerate more risk",
+                "Specific goals need specific strategies"
+            ]
         )
         
-        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            q5 = create_question_with_explanation(
+                5, "Primary Investment Goal",
+                options=[1, 2, 3, 4, 5, 6],
+                format_func=lambda x: [
+                    "Capital Preservation",
+                    "Regular Income",
+                    "Major Life Goal",
+                    "Retirement Planning",
+                    "Wealth Creation",
+                    "Not Sure"
+                ][x-1],
+                help_text="Your main reason for investing determines the strategy. "
+                        "Capital preservation is safest; wealth creation accepts more risk.",
+                example="Saving for house down payment in 5 years = Major Life Goal",
+                key="q5_form"
+            )
+        
+        with col2:
+            q6 = create_question_with_explanation(
+                6, "Investment Timeframe",
+                options=[1, 2, 3, 4, 5, 6],
+                format_func=lambda x: [
+                    "Less than 2 years",
+                    "2–4 years",
+                    "5–7 years",
+                    "8–12 years",
+                    "13+ years",
+                    "Multiple timeframes"
+                ][x-1],
+                help_text="How long can you keep the money invested without needing it? "
+                        "Longer timeframes allow more risk for higher potential returns.",
+                example="Retirement in 20 years = 13+ years; Vacation next year = Less than 2 years",
+                key="q6_form"
+            )
+        
+        q7 = create_question_with_explanation(
+            7, "Importance of Avoiding Loss",
+            options=[1, 2, 3, 4, 5, 6],
+            format_func=lambda x: [
+                "Critical - Cannot afford any loss",
+                "Very Important - Losses problematic",
+                "Important - Prefer stability",
+                "Moderate - Tolerate some loss",
+                "Flexible - Calculated risks",
+                "Growth Focused - Comfortable with volatility"
+            ][x-1],
+            help_text="How important is it that your investment never goes down in value? "
+                    "All stocks can decline; your comfort with this affects recommendations.",
+            example="Money for daughter's wedding next year = Critical; Retirement fund = Growth Focused",
+            key="q7_form"
+        )
+        
+        # Part 3: Risk Psychology
+        st.markdown('<div class="part-header">🟦 PART 3: RISK BEHAVIOR & PSYCHOLOGY</div>', unsafe_allow_html=True)
+        
+        show_section_explanation(
+            "Risk Psychology Assessment",
+            "This section measures your emotional and psychological relationship with risk and volatility. "
+            "Understanding your true risk tolerance prevents panic selling during market declines.",
+            [
+                "Be honest about how you'd react to losses",
+                "Past experience influences current tolerance",
+                "Risk tolerance often decreases with age"
+            ]
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            q8 = create_question_with_explanation(
+                8, "Reaction to 20% Market Drop",
+                options=[1, 2, 3, 4, 5],
+                format_func=lambda x: [
+                    "Sell to avoid further loss",
+                    "Reduce position but keep some",
+                    "Hold nervously but wait",
+                    "Stay calm and ride out",
+                    "See as buying opportunity"
+                ][x-1],
+                help_text="Stocks regularly decline 20%+. Your reaction shows true risk tolerance. "
+                        "Panic selling locks in losses; staying invested usually recovers.",
+                example="During COVID crash (March 2020), markets fell ~35% but recovered in months",
+                key="q8_form"
+            )
+        
+        with col2:
+            q9 = create_question_with_explanation(
+                9, "Maximum Tolerable Loss",
+                options=[1, 2, 3, 4, 5, 6],
+                format_func=lambda x: [
+                    "0–5% - Very conservative",
+                    "6–15% - Conservative",
+                    "16–25% - Moderate",
+                    "26–35% - Aggressive",
+                    "36–50% - Very aggressive",
+                    "More than 50% - Speculative"
+                ][x-1],
+                help_text="What maximum loss could you tolerate without panicking? "
+                        "Realistic assessment prevents stress during market corrections.",
+                example="If you invest ₹1 lakh, could you handle it dropping to ₹75,000 (25% loss)?",
+                key="q9_form"
+            )
+        
+        q10 = create_question_with_explanation(
+            10, "View on Market Volatility",
+            options=[1, 2, 3, 4, 5, 6],
+            format_func=lambda x: [
+                "Stressful and scary",
+                "Uncomfortable but manageable",
+                "Normal part of investing",
+                "Opportunity for better prices",
+                "Exciting and engaging",
+                "Analytical perspective"
+            ][x-1],
+            help_text="Volatility is normal in stock markets. Your emotional response affects investment decisions.",
+            example="Daily price swings of 2-3% are normal; yearly declines of 10-20% occur regularly",
+            key="q10_form"
+        )
+        
+        # Part 4: Experience & Personal
+        st.markdown('<div class="part-header">🟦 PART 4: EXPERIENCE & PERSONAL FACTORS</div>', unsafe_allow_html=True)
+        
+        show_section_explanation(
+            "Experience & Personal Factors",
+            "Your investing experience, knowledge, and personal circumstances affect appropriate recommendations. "
+            "Beginners need different guidance than experienced investors.",
+            [
+                "Beginners should start simple and learn gradually",
+                "Experience helps during market turbulence",
+                "Personal circumstances affect risk capacity"
+            ]
+        )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            q11 = create_question_with_explanation(
+                11, "Stock Investing Experience",
+                options=[1, 2, 3, 4, 5, 6],
+                format_func=lambda x: [
+                    "First-time investor",
+                    "Beginner (<1 year)",
+                    "Intermediate (1-3 years)",
+                    "Experienced (3-7 years)",
+                    "Advanced (7+ years)",
+                    "Professional background"
+                ][x-1],
+                help_text="Practical experience with stock investing, including market cycles. "
+                        "Experience helps manage emotions during volatility.",
+                example="Have you bought/sold stocks before? For how long? Through which platform?",
+                key="q11_form"
+            )
+        
+        with col2:
+            q12 = create_question_with_explanation(
+                12, "Stock Investing Knowledge",
+                options=[1, 2, 3, 4, 5, 6],
+                format_func=lambda x: [
+                    "Very Limited",
+                    "Basic",
+                    "Intermediate",
+                    "Good",
+                    "Advanced",
+                    "Expert"
+                ][x-1],
+                help_text="Understanding of stock market concepts (P/E ratio, diversification, sectors). "
+                        "Knowledge helps make informed decisions.",
+                example="Do you understand terms like market cap, dividends, earnings reports?",
+                key="q12_form"
+            )
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            q13 = create_question_with_explanation(
+                13, "Liquidity Needs",
+                options=[1, 2, 3, 4, 5, 6],
+                format_func=lambda x: [
+                    "Very likely (within 1 year)",
+                    "Likely (1-2 years)",
+                    "Possible (2-3 years)",
+                    "Unlikely (3-5 years)",
+                    "Very unlikely (5+ years)",
+                    "Never – long-term only"
+                ][x-1],
+                help_text="How likely will you need to withdraw this money? "
+                        "Stocks are not suitable for short-term needs due to volatility.",
+                example="Emergency medical fund = Very likely; Retirement fund = Very unlikely",
+                key="q13_form"
+            )
+        
+        with col2:
+            q14 = create_question_with_explanation(
+                14, "Age Group",
+                options=[1, 2, 3, 4, 5, 6],
+                format_func=lambda x: [
+                    "Under 25 years",
+                    "25-34 years",
+                    "35-44 years",
+                    "45-54 years",
+                    "55-64 years",
+                    "65+ years"
+                ][x-1],
+                help_text="Age affects investment strategy (younger = more growth focus, older = more stability). "
+                        "Based on '100 minus age' rule for equity allocation.",
+                example="Age 30: up to 70% in stocks; Age 60: up to 40% in stocks",
+                key="q14_form"
+            )
         
         # Submit button
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             submitted = st.form_submit_button(
-                "🚀 Calculate My Stock Investment Plan", 
+                "🚀 Calculate My Personalized Investment Plan",
                 type="primary",
                 use_container_width=True
             )
         
         if submitted:
-            # Basic validation
-            if monthly_expenses > monthly_income:
-                st.warning("⚠️ Your expenses exceed your income. Please review your inputs.")
-                return
-            
             # Save answers
             st.session_state.answers.update({
-                'monthly_income': float(monthly_income),
-                'monthly_expenses': float(monthly_expenses),
-                'emergency': int(emergency),
-                'high_interest_debt': float(high_interest_debt),
-                'age': int(age),
-                'purpose': int(purpose),
-                'horizon': int(horizon),
-                'risk_behavior': int(risk_behavior),
-                'experience': int(experience),
-                'goal_priority': int(goal_priority),
-                'loss_capacity': int(loss_capacity),
-                'liquidity_need': int(liquidity_need)
+                'q1': q1, 'q2': q2, 'q3': q3, 'q4': q4,
+                'q5': q5, 'q6': q6, 'q7': q7, 'q8': q8,
+                'q9': q9, 'q10': q10, 'q11': q11, 'q12': q12,
+                'q13': q13, 'q14': q14
             })
             
-            # Calculate results and navigate
+            # Clear any previous warnings
+            st.session_state.validation_warnings = []
+            
+            # Calculate results
             calculate_results()
-    
-    # Navigation help at bottom
-    st.markdown("---")
-    st.markdown("""
-    **📋 What's next after submitting?**
-    
-    1. **Financial Health Score** → 2. **Risk Profile** → 3. **Stock Recommendations** → 4. **Action Plan**
-    """)
 
-# -------------------------
-# Financial Health Tab (UPDATED with navigation)
-# -------------------------
+
 def create_financial_health_tab():
+    """Create financial health dashboard with explanations"""
     st.markdown('<h1 class="main-header">💰 Financial Health Assessment</h1>', unsafe_allow_html=True)
     
-    if not st.session_state.assessment_complete or st.session_state.financial_health_score is None:
+    if not st.session_state.assessment_complete:
         st.warning("Please complete the assessment first!")
-        st.button("Go to Assessment", on_click=lambda: setattr(st.session_state, 'current_tab', 'Assessment'))
+        if st.button("Go to Assessment"):
+            st.session_state.current_tab = "Assessment"
+            st.rerun()
         return
     
-    financial_data = st.session_state.financial_health_score
+    financial_data = st.session_state.financial_data
     
-    # Header metrics
+    # Section explanation
+    show_section_explanation(
+        "Your Financial Health Score",
+        "This score evaluates your readiness for stock investing based on emergency funds, debt, and savings. "
+        "Higher scores indicate stronger financial foundation for investing.",
+        [
+            "Score 0-40: Focus on emergency fund and debt reduction",
+            "Score 41-70: Moderate readiness, proceed with caution",
+            "Score 71-100: Strong foundation for investing"
+        ]
+    )
+    
+    # Metrics with explanations
     col1, col2, col3, col4 = st.columns(4)
+    
     with col1:
-        score = financial_data['financial_health_score']
+        score = financial_data['financial_score']
         color = "#10B981" if score >= 70 else "#F59E0B" if score >= 50 else "#EF4444"
         st.markdown(f"""
         <div class="metric-card">
             <h3 style="margin: 0; font-size: 1.1rem;">Financial Health Score</h3>
-            <h1 style="margin: 0.35rem 0; font-size: 2.5rem; color: {color};">{score}/100</h1>
-            <p style="margin: 0;">{'🟢 Strong' if score >= 70 else '🟡 Needs Work' if score >= 50 else '🔴 Critical'}</p>
+            <h1 style="margin: 0.5rem 0; font-size: 2.5rem;">{score}/100</h1>
+            <p style="margin: 0;">{'🟢 Strong Foundation' if score >= 70 else '🟡 Needs Improvement' if score >= 50 else '🔴 Requires Attention'}</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        with st.expander("What this means"):
+            if score >= 70:
+                st.success("Your financial foundation is strong. You can confidently consider stock investments.")
+            elif score >= 50:
+                st.info("Your finances are reasonable but could be improved. Consider addressing weaknesses before significant investing.")
+            else:
+                st.warning("Focus on building emergency fund and reducing debt before stock investing.")
     
     with col2:
         disposable = financial_data['disposable_income']
+        monthly_income = financial_data['monthly_income']
+        pct = (disposable / monthly_income * 100) if monthly_income > 0 else 0
+        
         st.markdown(f"""
-        <div class="card" style="border-left-color: #3B82F6;">
+        <div class="card">
             <h4 style="margin: 0;">Monthly Disposable Income</h4>
-            <h2 style="margin: 0.4rem 0; color: #3B82F6;">₹{disposable:,.0f}</h2>
-            <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">Income - Expenses</p>
+            <h2 style="margin: 0.5rem 0; color: #3B82F6;">₹{disposable:,.0f}</h2>
+            <p style="margin: 0; color: #6B7280;">{pct:.1f}% of income</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        with st.expander("About this metric"):
+            st.markdown("""
+            **Disposable Income = Income - Essential Expenses**
+            
+            This is the amount available for:
+            • Emergency fund building
+            • Debt repayment
+            • Investments
+            • Discretionary spending
+            
+            **Healthy target:** 20-30% of take-home income
+            """)
     
     with col3:
-        debt_ratio = financial_data['debt_ratio']
-        debt_color = "#10B981" if debt_ratio <= 0.1 else "#F59E0B" if debt_ratio <= 0.3 else "#EF4444"
+        savings = financial_data['savings_rate']
+        color = "#10B981" if savings >= 20 else "#F59E0B" if savings >= 10 else "#EF4444"
         st.markdown(f"""
-        <div class="card" style="border-left-color: {debt_color};">
-            <h4 style="margin: 0;">Debt to Income Ratio</h4>
-            <h2 style="margin: 0.4rem 0; color: {debt_color};">{debt_ratio:.1%}</h2>
-            <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">{'🟢 Low' if debt_ratio <= 0.1 else '🟡 Moderate' if debt_ratio <= 0.3 else '🔴 High'}</p>
+        <div class="card" style="border-left-color: {color};">
+            <h4 style="margin: 0;">Savings Rate</h4>
+            <h2 style="margin: 0.5rem 0; color: {color};">{savings:.1f}%</h2>
+            <p style="margin: 0; color: #6B7280;">{'🟢 Good' if savings >= 20 else '🟡 Okay' if savings >= 10 else '🔴 Low'}</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        with st.expander("Savings rate guidance"):
+            st.markdown("""
+            **Recommended savings rates:**
+            • **20%+:** Excellent - Strong investing capacity
+            • **10-19%:** Good - Room for improvement
+            • **<10%:** Low - Focus on increasing income/reducing expenses
+            
+            **Note:** This is savings rate from take-home pay, not gross salary.
+            """)
     
     with col4:
-        savings_score = financial_data['savings_rate_score']
-        savings_rate = (financial_data['disposable_income'] / st.session_state.answers.get('monthly_income', 1)) * 100
-        savings_color = "#10B981" if savings_rate >= 20 else "#F59E0B" if savings_rate >= 10 else "#EF4444"
+        emergency_months = financial_data['emergency_months']
+        color = "#10B981" if emergency_months >= 6 else "#F59E0B" if emergency_months >= 3 else "#EF4444"
         st.markdown(f"""
-        <div class="card" style="border-left-color: {savings_color};">
-            <h4 style="margin: 0;">Savings Rate</h4>
-            <h2 style="margin: 0.4rem 0; color: {savings_color};">{savings_rate:.1f}%</h2>
-            <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">{'🟢 Good' if savings_rate >= 20 else '🟡 Okay' if savings_rate >= 10 else '🔴 Low'}</p>
+        <div class="card" style="border-left-color: {color};">
+            <h4 style="margin: 0;">Emergency Fund</h4>
+            <h2 style="margin: 0.5rem 0; color: {color};">{emergency_months:.1f} months</h2>
+            <p style="margin: 0; color: #6B7280;">{'🟢 Adequate' if emergency_months >= 6 else '🟡 Moderate' if emergency_months >= 3 else '🔴 Insufficient'}</p>
         </div>
         """, unsafe_allow_html=True)
-    
-    # Detailed Breakdown
-    st.markdown('<h3 class="section-header">📊 Financial Health Breakdown</h3>', unsafe_allow_html=True)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        # Emergency Fund Status
-        emergency_score = int(st.session_state.answers.get('emergency', 3))
-        emergency_labels = ["No fund", "1 month", "1-3 months", "3-6 months", "6+ months"]
-        emergency_status = emergency_labels[emergency_score - 1]
         
-        st.markdown("<div class='card'><h4 style='margin:0 0 1rem 0;'>🛡️ Emergency Fund Status</h4>", unsafe_allow_html=True)
-        progress = emergency_score / 5.0
+        with st.expander("Emergency fund importance"):
+            st.markdown("""
+            **Why emergency fund comes first:**
+            1. Prevents selling investments during emergencies
+            2. Reduces financial stress
+            3. Avoids high-interest debt
+            
+            **Recommended:** 3-6 months of essential expenses
+            **High risk jobs:** 6-12 months recommended
+            """)
+    
+    # Components Breakdown with detailed explanations
+    st.markdown('<h3 class="section-header">📊 Components Breakdown</h3>', unsafe_allow_html=True)
+    
+    components = [
+        ("Emergency Fund", financial_data['emergency_component'], "#3B82F6",
+         "Adequate emergency savings before investing"),
+        ("Debt Status", financial_data['debt_component'], "#10B981",
+         "Managing high-interest debt effectively"),
+        ("Savings Rate", financial_data['savings_component'], "#8B5CF6",
+         "Positive cash flow enabling investments")
+    ]
+    
+    for label, score, color, description in components:
         st.markdown(f"""
-        <div class="progress-bar">
-            <div class="progress-fill" style="width: {progress*100}%; background-color: #3B82F6;"></div>
-        </div>
-        <p style="margin: 0.5rem 0; font-weight: 600;">{emergency_status}</p>
-        <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">
-            {'✅ Recommended level reached' if emergency_score >= 4 else 
-             '⚠️ Consider building to 3-6 months' if emergency_score >= 2 else 
-             '🚨 Build emergency fund first'}
-        </p>
-        """, unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-        # Debt Analysis
-        high_interest_debt = st.session_state.answers.get('high_interest_debt', 0)
-        if high_interest_debt > 0:
-            st.markdown("<div class='card' style='border-left-color: #EF4444;'><h4 style='margin:0 0 1rem 0;'>💳 High-Interest Debt</h4>", unsafe_allow_html=True)
-            st.markdown(f"""
-            <p style="margin: 0; font-weight: 600; color: #EF4444;">₹{high_interest_debt:,.0f}</p>
-            <p style="margin: 0.5rem 0; color: #6B7280; font-size: 0.9rem;">
-            Minimum monthly payment: ₹{high_interest_debt * 0.03:,.0f}
-            </p>
-            <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">
-            {'🚨 Priority: Pay this before aggressive investing' if debt_ratio > 0.3 else 
-             '⚠️ Consider paying down before increasing investments'}
-            </p>
-            """, unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-    
-    with col2:
-        # Income vs Expenses
-        income = st.session_state.answers.get('monthly_income', 0)
-        expenses = st.session_state.answers.get('monthly_expenses', 0)
-        
-        st.markdown("<div class='card'><h4 style='margin:0 0 1rem 0;'>📈 Income vs Expenses</h4>", unsafe_allow_html=True)
-        
-        # Create a simple bar chart using HTML
-        max_val = max(income, expenses)
-        income_width = (income / max_val) * 100 if max_val > 0 else 0
-        expenses_width = (expenses / max_val) * 100 if max_val > 0 else 0
-        
-        st.markdown(f"""
-        <div style="margin-bottom: 1rem;">
-            <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
-                <span>Income</span>
-                <span>₹{income:,.0f}</span>
+        <div style="margin-bottom: 1.5rem;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                <div>
+                    <span style="font-weight: 600;">{label}</span>
+                    <span style="font-size: 0.9rem; color: #6B7280; margin-left: 10px;">{description}</span>
+                </div>
+                <span style="font-weight: 600; color: {color};">{score:.0f}/100</span>
             </div>
             <div class="progress-bar">
-                <div class="progress-fill" style="width: {income_width}%; background-color: #10B981;"></div>
-            </div>
-        </div>
-        
-        <div>
-            <div style="display: flex; justify-content: space-between; margin-bottom: 0.25rem;">
-                <span>Expenses</span>
-                <span>₹{expenses:,.0f}</span>
-            </div>
-            <div class="progress-bar">
-                <div class="progress-fill" style="width: {expenses_width}%; background-color: #EF4444;"></div>
-            </div>
-        </div>
-        
-        <div style="margin-top: 1rem; padding: 0.75rem; background-color: #F3F4F6; border-radius: 6px;">
-            <div style="display: flex; justify-content: space-between;">
-                <span style="font-weight: 600;">Disposable Income</span>
-                <span style="font-weight: 600; color: #3B82F6;">₹{income-expenses:,.0f}</span>
+                <div class="progress-fill" style="width: {score}%; background-color: {color};"></div>
             </div>
         </div>
         """, unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
     
-    # Priority Actions
-    st.markdown('<h3 class="section-header">🎯 Priority Actions</h3>', unsafe_allow_html=True)
+    # Show calculation methodology
+    show_calculation_methodology()
     
-    investment_data = st.session_state.safe_investment or {}
-    if not investment_data:
-        st.warning("Investment recommendations not ready.")
-    else:
-        # Create action cards
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            if investment_data.get('ef_gap_amount', 0) > 0:
-                st.markdown(f"""
-                <div class="card" style="border-left-color: #EF4444;">
-                    <h4 style="margin:0 0 0.5rem 0; color: #EF4444;">🔴 Build Emergency Fund</h4>
-                    <p style="margin: 0 0 0.5rem 0; font-weight: 600;">₹{investment_data['ef_gap_amount']:,.0f} needed</p>
-                    <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">
-                    Save ₹{investment_data['monthly_ef_saving']:,.0f}/month
-                    </p>
-                    <p style="margin: 0.5rem 0 0 0; color: #6B7280; font-size: 0.9rem;">
-                    Target: 6 months of expenses
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        with col2:
-            if st.session_state.answers.get('high_interest_debt', 0) > 0:
-                st.markdown(f"""
-                <div class="card" style="border-left-color: #F59E0B;">
-                    <h4 style="margin:0 0 0.5rem 0; color: #F59E0B;">🟡 Pay High-Interest Debt</h4>
-                    <p style="margin: 0 0 0.5rem 0; font-weight: 600;">₹{st.session_state.answers.get('high_interest_debt', 0):,.0f} total</p>
-                    <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">
-                    Minimum payment: ₹{investment_data['monthly_debt_payment']:,.0f}/month
-                    </p>
-                    <p style="margin: 0.5rem 0 0 0; color: #6B7280; font-size: 0.9rem;">
-                    Priority before aggressive investing
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        with col3:
-            if investment_data.get('safe_monthly_investment', 0) > 0:
-                st.markdown(f"""
-                <div class="card" style="border-left-color: #10B981;">
-                    <h4 style="margin:0 0 0.5rem 0; color: #10B981;">🟢 Start Investing</h4>
-                    <p style="margin: 0 0 0.5rem 0; font-weight: 600;">₹{investment_data['safe_monthly_investment']:,.0f}/month</p>
-                    <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">
-                    Safe amount after priorities
-                    </p>
-                    <p style="margin: 0.5rem 0 0 0; color: #6B7280; font-size: 0.9rem;">
-                    {investment_data['investment_tier']:.0f}% of disposable income
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                st.markdown(f"""
-                <div class="card" style="border-left-color: #F59E0B;">
-                    <h4 style="margin:0 0 0.5rem 0; color: #F59E0B;">🟡 Increase Savings</h4>
-                    <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">
-                    Your disposable income is insufficient for investing
-                    </p>
-                    <p style="margin: 0.5rem 0 0 0; color: #6B7280; font-size: 0.9rem;">
-                    Focus on reducing expenses or increasing income first
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
-    
-    # Navigation buttons
-    st.markdown("---")
     create_navigation_buttons()
 
-# -------------------------
-# Risk Profile Tab (UPDATED with navigation)
-# -------------------------
+
 def create_risk_profile_tab():
+    """Create risk profile analysis with explanations"""
     st.markdown('<h1 class="main-header">🎯 Risk Profile Analysis</h1>', unsafe_allow_html=True)
     
     if not st.session_state.assessment_complete:
         st.warning("Please complete the assessment first!")
-        st.button("Go to Assessment", on_click=lambda: setattr(st.session_state, 'current_tab', 'Assessment'))
+        if st.button("Go to Assessment"):
+            st.session_state.current_tab = "Assessment"
+            st.rerun()
         return
     
-    risk_scores = st.session_state.risk_scores or {}
-    risk_category = st.session_state.risk_category or "Unknown"
-    confidence_score = st.session_state.confidence_score or {'score': 0, 'level': 'LOW', 'penalties': []}
-    override_log = st.session_state.override_log or []
+    risk_data = st.session_state.risk_data
+    risk_category = st.session_state.risk_category
     
-    # Risk Category Display
+    # Section explanation
+    show_section_explanation(
+        "Your Risk Profile",
+        "This profile combines your financial situation, psychological tolerance, investment horizon, "
+        "and experience to determine appropriate investment risk level.",
+        [
+            "Higher risk tolerance allows more aggressive investments",
+            "Risk profile should match your emotional comfort",
+            "Different profiles require different strategies"
+        ]
+    )
+    
+    # Risk Category
     category_colors = {
-        "VERY LOW RISK": "#10B981",
-        "LOW RISK": "#34D399",
-        "MEDIUM RISK": "#F59E0B",
-        "HIGH RISK": "#F97316",
+        "VERY LOW RISK": "#10B981", "LOW RISK": "#34D399",
+        "MEDIUM RISK": "#F59E0B", "HIGH RISK": "#F97316",
         "VERY HIGH RISK": "#EF4444"
     }
-    category_icons = {
-        "VERY LOW RISK": "🟢",
-        "LOW RISK": "🟢",
-        "MEDIUM RISK": "🟡",
-        "HIGH RISK": "🟠",
-        "VERY HIGH RISK": "🔴"
-    }
+    
     color = category_colors.get(risk_category, "#6B7280")
     
     col1, col2 = st.columns([2, 1])
     with col1:
         st.markdown(f"""
-        <div style="background-color: {color}20; padding: 1.25rem; border-radius: 10px; border-left: 5px solid {color};">
-            <h2 style="margin: 0; color: {color};">{category_icons.get(risk_category, '⚫')} {risk_category}</h2>
-            <p style="margin: 0.5rem 0 0 0; color: #6B7280;">Based on your 90-point risk assessment</p>
+        <div style="background-color: {color}20; padding: 1.5rem; border-radius: 10px; 
+                    border-left: 5px solid {color}; margin-bottom: 1rem;">
+            <h2 style="margin: 0; color: {color};">{risk_category}</h2>
+            <p style="margin: 0.5rem 0 0 0; color: #6B7280;">Based on 14-question multi-dimensional assessment</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        with st.expander("What this risk category means"):
+            if risk_category == "VERY LOW RISK":
+                st.info("""
+                **Conservative Investor**
+                - Prefers stability over growth
+                - Low tolerance for volatility
+                - Shorter time horizon or immediate needs
+                - Focus on capital preservation
+                """)
+            elif risk_category == "LOW RISK":
+                st.info("""
+                **Cautious Investor**
+                - Some growth acceptable
+                - Limited volatility tolerance
+                - May have medium-term goals
+                - Balanced approach
+                """)
+            elif risk_category == "MEDIUM RISK":
+                st.info("""
+                **Moderate Investor**
+                - Balance of growth and safety
+                - Moderate volatility tolerance
+                - Medium to long-term horizon
+                - Diversified approach
+                """)
+            elif risk_category == "HIGH RISK":
+                st.info("""
+                **Growth Investor**
+                - Prioritizes growth over safety
+                - Higher volatility tolerance
+                - Long-term time horizon
+                - Aggressive approach
+                """)
+            else:  # VERY HIGH RISK
+                st.info("""
+                **Aggressive Investor**
+                - Maximizes growth potential
+                - High volatility tolerance
+                - Very long-term horizon
+                - Speculative approach
+                """)
     
     with col2:
-        conf_color = "#10B981" if confidence_score['score'] >= 80 else "#F59E0B" if confidence_score['score'] >= 60 else "#EF4444"
+        score = risk_data['overall_risk_score']
         st.markdown(f"""
         <div class="card">
-            <h4 style="margin: 0;">Confidence Score</h4>
-            <h2 style="margin: 0.4rem 0; color: {conf_color};">{confidence_score['score']}/100</h2>
-            <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">{confidence_score['level']} Confidence</p>
+            <h4 style="margin: 0;">Overall Risk Score</h4>
+            <h2 style="margin: 0.5rem 0; color: {color};">{score:.0f}/100</h2>
+            <p style="margin: 0; color: #6B7280;">0-100 scale (higher = more risk tolerant)</p>
         </div>
         """, unsafe_allow_html=True)
     
-    # Risk Score Breakdown
-    st.markdown('<h3 class="section-header">📊 Risk Score Breakdown (90-point system)</h3>', unsafe_allow_html=True)
+    # Components with detailed explanations
+    st.markdown('<h3 class="section-header">📊 Risk Score Components</h3>', unsafe_allow_html=True)
     
-    scores = [
-        ("Risk Capacity", risk_scores.get('risk_capacity', 0), 40, "#3B82F6", "Financial ability to take risk"),
-        ("Risk Tolerance", risk_scores.get('risk_tolerance', 0), 30, "#10B981", "Psychological comfort with risk"),
-        ("Risk Requirement", risk_scores.get('risk_requirement', 0), 20, "#8B5CF6", "Risk needed for your goals"),
-        ("Total Score", risk_scores.get('total_score', 0), 90, color, "Overall risk profile")
+    components = [
+        ("Financial Stability", risk_data['financial_data']['financial_score'], "#3B82F6",
+         "Your financial foundation readiness"),
+        ("Risk Tolerance", risk_data['risk_tolerance_data']['risk_tolerance_score'], "#10B981",
+         "Psychological comfort with risk and volatility"),
+        ("Investment Horizon", risk_data['horizon_data']['horizon_score'], "#8B5CF6",
+         "Time available for investments to grow"),
+        ("Knowledge & Experience", risk_data['knowledge_data']['knowledge_score'], "#F59E0B",
+         "Your investing knowledge and practical experience")
     ]
     
-    for label, score, max_score, bar_color, description in scores:
-        percentage = (score / max_score) * 100 if max_score > 0 else 0
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.markdown(f"""
-            <div style="margin-bottom: 1rem;">
-                <div style="display: flex; justify-content: space-between; margin-bottom: 0.35rem;">
+    # Show weights used
+    weights = risk_data.get('weights_used', WEIGHTS)
+    
+    for (label, score, color, description), weight_key in zip(
+        components, 
+        ['financial_stability', 'risk_tolerance', 'investment_horizon', 'knowledge_experience']
+    ):
+        weight = weights.get(weight_key, 0.25) * 100
+        
+        st.markdown(f"""
+        <div style="margin-bottom: 1.5rem;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                <div>
                     <span style="font-weight: 600;">{label}</span>
-                    <span style="font-weight: 600; color: {bar_color};">{score}/{max_score}</span>
+                    <span style="font-size: 0.9rem; color: #6B7280; margin-left: 10px;">{description}</span>
+                    <span style="font-size: 0.8rem; color: #9CA3AF; margin-left: 10px;">(Weight: {weight:.0f}%)</span>
                 </div>
-                <div class="progress-bar">
-                    <div class="progress-fill" style="width: {percentage}%; background-color: {bar_color};"></div>
-                </div>
-                <p style="margin: 0.25rem 0 0 0; color: #6B7280; font-size: 0.9rem;">{description}</p>
+                <span style="font-weight: 600; color: {color};">{score:.0f}/100</span>
             </div>
-            """, unsafe_allow_html=True)
-    
-    # Safety Overrides
-    st.markdown('<h3 class="section-header">🛡️ Safety Overrides Applied</h3>', unsafe_allow_html=True)
-    if override_log:
-        for override in override_log:
-            st.info(f"✅ {override}")
-    else:
-        st.success("✅ No safety overrides were needed for your profile")
-    
-    # Confidence Score Details
-    if confidence_score.get('penalties'):
-        st.markdown('<h3 class="section-header">📉 Confidence Score Factors</h3>', unsafe_allow_html=True)
-        st.markdown("""
-        <div class="warning-box">
-            <strong>Factors affecting your confidence score:</strong>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: {score}%; background-color: {color};"></div>
+            </div>
         </div>
         """, unsafe_allow_html=True)
-        for penalty in confidence_score['penalties']:
-            st.markdown(f"⚠️ {penalty}")
     
-    # Navigation buttons
-    st.markdown("---")
+    # Risk tolerance details
+    st.markdown('<h3 class="section-header">🎭 Risk Tolerance Details</h3>', unsafe_allow_html=True)
+    
+    risk_tolerance = risk_data['risk_tolerance_data']
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        max_loss = risk_tolerance.get('max_tolerable_loss_pct', 20.5)
+        st.metric("Maximum Tolerable Loss", f"{max_loss:.1f}%")
+    
+    with col2:
+        components = risk_tolerance.get('components', {})
+        emotional = components.get('emotional', 50)
+        st.metric("Emotional Stability", f"{emotional:.0f}/100")
+    
+    with col3:
+        volatility = components.get('volatility_view', 50) if 'components' in risk_tolerance else 50
+        st.metric("Volatility Comfort", f"{volatility:.0f}/100")
+    
+    # Show calculation methodology
+    show_calculation_methodology()
+    
     create_navigation_buttons()
 
-# -------------------------
-# Recommendations Tab (UPDATED with navigation)
-# -------------------------
+
 def create_recommendations_tab():
+    """Create investment recommendations with enhanced explanations"""
     st.markdown('<h1 class="main-header">💼 Stock Investment Recommendations</h1>', unsafe_allow_html=True)
     
     if not st.session_state.assessment_complete:
         st.warning("Please complete the assessment first!")
-        st.button("Go to Assessment", on_click=lambda: setattr(st.session_state, 'current_tab', 'Assessment'))
+        if st.button("Go to Assessment"):
+            st.session_state.current_tab = "Assessment"
+            st.rerun()
         return
     
-    allocation = st.session_state.allocation or {}
-    investment_data = st.session_state.safe_investment or {}
-    risk_category = st.session_state.risk_category or "Unknown"
+    allocation = st.session_state.allocation
+    investment_data = st.session_state.safe_investment
+    recommendations = st.session_state.recommendations
     
-    # Investment Summary
+    # Suitability check
+    suitability = investment_data.get('suitability', {})
+    
+    if suitability.get('suitability') == "NOT SUITABLE":
+        st.markdown('<div class="danger-box">', unsafe_allow_html=True)
+        st.error("⚠️ **Not Currently Suitable for Stock Investing**")
+        st.markdown(f"""
+        **Recommendation:** {suitability.get('recommendation', '')}
+        
+        **Blocking Issues:**
+        """)
+        for issue in suitability.get('blocking_issues', []):
+            st.markdown(f"• {issue}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    elif suitability.get('suitability') == "CAUTION ADVISED":
+        st.markdown('<div class="warning-box">', unsafe_allow_html=True)
+        st.warning("⚠️ **Caution Advised for Stock Investing**")
+        st.markdown(f"""
+        **Recommendation:** {suitability.get('recommendation', '')}
+        
+        **Warnings to Address:**
+        """)
+        for warning in suitability.get('warnings', []):
+            st.markdown(f"• {warning}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="success-box">', unsafe_allow_html=True)
+        st.success("✅ **Suitable for Stock Investing**")
+        st.markdown(f"**Recommendation:** {suitability.get('recommendation', 'Proceed with recommended plan')}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Section explanation
+    show_section_explanation(
+        "Your Investment Recommendations",
+        "These recommendations are personalized based on your risk profile, financial situation, "
+        "and investment goals. They balance growth potential with appropriate risk levels.",
+        [
+            "Allocation matches your risk tolerance",
+            "Amount is sustainable based on your finances",
+            "Stocks are selected for your profile"
+        ]
+    )
+    
+    # Investment Summary with explanations
     col1, col2, col3 = st.columns(3)
+    
     with col1:
-        monthly_inv = investment_data.get('safe_monthly_investment', 0.0)
+        monthly = investment_data['safe_monthly_investment']
+        conf = investment_data['investment_confidence']
+        conf_color = "#10B981" if "High" in conf or "Very High" in conf else "#F59E0B" if "Medium" in conf else "#EF4444"
+        
         st.markdown(f"""
         <div class="metric-card">
             <h3 style="margin: 0; font-size: 1.1rem;">Monthly Investment</h3>
-            <h1 style="margin: 0.35rem 0; font-size: 2rem; color: white;">₹{monthly_inv:,.0f}</h1>
-            <p style="margin: 0;">Safe amount after priorities</p>
+            <h1 style="margin: 0.5rem 0; font-size: 2rem;">₹{monthly:,.0f}</h1>
+            <p style="margin: 0;">Confidence: <span style="color: {conf_color};">{conf}</span></p>
         </div>
         """, unsafe_allow_html=True)
+        
+        with st.expander("About this amount"):
+            if monthly == 0:
+                st.info("No investment recommended due to financial priorities.")
+            else:
+                st.info(f"""
+                **How this was calculated:**
+                • Based on **{investment_data['investment_percentage']:.1f}%** of available funds
+                • After accounting for emergency fund building
+                • After considering debt repayment needs
+                • Capped at sustainable levels
+                
+                **This amount is:**
+                • Sustainable for your income
+                • Appropriate for your risk level
+                • Realistic for regular investing
+                """)
     
     with col2:
-        annual_inv = investment_data.get('annual_investment', 0.0)
+        annual = investment_data['annual_investment']
         st.markdown(f"""
         <div class="card" style="border-left-color: #10B981;">
             <h4 style="margin: 0;">Annual Investment</h4>
-            <h2 style="margin: 0.4rem 0; color: #10B981;">₹{annual_inv:,.0f}</h2>
-            <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">12 × Monthly</p>
+            <h2 style="margin: 0.5rem 0; color: #10B981;">₹{annual:,.0f}</h2>
+            <p style="margin: 0; color: #6B7280;">12 × Monthly investment</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        with st.expander("Annual perspective"):
+            st.info(f"""
+            **What ₹{annual:,.0f}/year can achieve:**
+            
+            Assuming 12% average annual return:
+            • **5 years:** ₹{annual * 5:,.0f} invested, ~₹{annual * 5 * 1.76:,.0f} potential value
+            • **10 years:** ₹{annual * 10:,.0f} invested, ~₹{annual * 10 * 3.11:,.0f} potential value
+            • **20 years:** ₹{annual * 20:,.0f} invested, ~₹{annual * 20 * 9.65:,.0f} potential value
+            
+            *Note: Returns are not guaranteed. Past performance doesn't indicate future results.*
+            """)
     
     with col3:
-        tier = investment_data.get('investment_tier', 0.0)
+        priority = investment_data.get('recommendation_priority', 'INVESTMENT')
+        priority_colors = {
+            'EMERGENCY_FUND': '#EF4444',
+            'DEBT_REDUCTION': '#F59E0B',
+            'INVESTMENT': '#10B981'
+        }
+        priority_color = priority_colors.get(priority, '#6B7280')
+        
         st.markdown(f"""
-        <div class="card" style="border-left-color: #8B5CF6;">
-            <h4 style="margin: 0;">Investment Tier</h4>
-            <h2 style="margin: 0.4rem 0; color: #8B5CF6;">{tier:.0f}% of Disposable</h2>
-            <p style="margin: 0; color: #6B7280; font-size: 0.9rem;">Based on financial health</p>
+        <div class="card" style="border-left-color: {priority_color};">
+            <h4 style="margin: 0;">Current Priority</h4>
+            <h2 style="margin: 0.5rem 0; color: {priority_color};">
+                {priority.replace('_', ' ').title()}
+            </h2>
+            <p style="margin: 0; color: #6B7280;">Based on your assessment</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        with st.expander("Priority explanation"):
+            if priority == 'EMERGENCY_FUND':
+                st.warning("""
+                **Emergency Fund is Priority #1**
+                
+                Before any stock investing:
+                1. Build emergency fund to 3-6 months of expenses
+                2. This prevents selling investments during emergencies
+                3. Reduces financial stress
+                
+                **Monthly allocation:** ₹{investment_data.get('monthly_ef_saving', 0):,.0f}
+                """)
+            elif priority == 'DEBT_REDUCTION':
+                st.warning("""
+                **Debt Reduction is Priority #1**
+                
+                Before significant stock investing:
+                1. Pay down high-interest debt (>12%)
+                2. This gives guaranteed "return" equal to interest rate
+                3. Reduces monthly financial burden
+                
+                **Monthly allocation:** ₹{investment_data.get('monthly_debt_payment', 0):,.0f}
+                """)
+            else:
+                st.success("""
+                **Investment is Appropriate**
+                
+                Your financial foundation is solid:
+                1. Emergency fund is adequate
+                2. Debt is manageable
+                3. Positive cash flow exists
+                
+                You can proceed with recommended investment plan.
+                """)
     
-    # Portfolio Allocation
-    st.markdown('<h3 class="section-header">📊 Stock Allocation for Your Risk Profile</h3>', unsafe_allow_html=True)
+    # Portfolio Allocation with explanations
+    st.markdown('<h3 class="section-header">📊 Portfolio Allocation</h3>', unsafe_allow_html=True)
     
-    if not allocation:
-        st.info("No allocation available. Please complete assessment.")
-        return
+    st.caption("""
+    This allocation shows how your monthly investment should be divided across different stock categories
+    to balance growth potential with appropriate risk for your profile.
+    """)
     
     col1, col2 = st.columns([2, 1])
+    
     with col1:
-        # Pie chart for allocation
-        labels = list(allocation.keys())
-        values = list(allocation.values())
-        colors = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444'][:len(labels)]
-        fig = go.Figure(data=[go.Pie(labels=labels, values=values, hole=0.4, marker_colors=colors, textinfo='label+percent')])
-        fig.update_layout(height=360, showlegend=False, margin=dict(t=0, b=0, l=0, r=0))
+        # Prepare data for pie chart
+        labels = []
+        values = []
+        colors_pie = []
+        descriptions = []
+        
+        category_info = {
+            "Large_Cap": ("Large Cap Stocks", "#3B82F6", "Established companies, lower risk, stable returns"),
+            "Mid_Cap": ("Mid Cap Stocks", "#10B981", "Growing companies, moderate risk, good growth potential"),
+            "Small_Cap": ("Small Cap Stocks", "#F59E0B", "Small companies, higher risk, high growth potential"),
+            "Growth": ("Growth Stocks", "#8B5CF6", "High-growth companies, higher risk, aggressive growth"),
+            "Fixed_Income": ("Fixed Income", "#6B7280", "Conservative allocation for stability")
+        }
+        
+        for key, value in allocation.items():
+            if value > 0:  # Only show categories with allocation
+                label, color, desc = category_info.get(key, (key, "#999999", ""))
+                labels.append(f"{label} ({value}%)")
+                values.append(value)
+                colors_pie.append(color)
+                descriptions.append(desc)
+        
+        fig = go.Figure(data=[go.Pie(
+            labels=labels, 
+            values=values, 
+            hole=0.4, 
+            marker_colors=colors_pie,
+            textinfo='label+percent',
+            hovertemplate="<b>%{label}</b><br>%{percent}<br><i>%{customdata}</i><extra></extra>",
+            customdata=descriptions
+        )])
+        
+        fig.update_layout(
+            height=400, 
+            showlegend=False, 
+            margin=dict(t=0, b=0, l=0, r=0),
+            annotations=[dict(
+                text=f"Total: 100%<br>₹{investment_data['safe_monthly_investment']:,.0f}/mo",
+                x=0.5, y=0.5, font_size=14, showarrow=False
+            )]
+        )
         st.plotly_chart(fig, use_container_width=True)
     
     with col2:
-        st.markdown("<div style='background-color:#F9FAFB; padding:1rem; border-radius:10px;'>", unsafe_allow_html=True)
-        monthly_inv = investment_data.get('safe_monthly_investment', 0.0)
-        for category, percentage in allocation.items():
-            amount = (percentage / 100.0) * monthly_inv
-            st.markdown(f"""
-            <div style="margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid #E5E7EB;">
-                <div style="display:flex; justify-content:space-between;">
-                    <span style="font-weight:600;">{category}</span>
-                    <span style="font-weight:600; color:#1F2937;">{percentage}%</span>
+        monthly_inv = investment_data['safe_monthly_investment']
+        
+        with st.expander("ℹ️ What do these categories mean?", expanded=True):
+            st.markdown("""
+            **Large Cap Stocks:**
+            • Established companies (Reliance, TCS, HDFC Bank)
+            • Lower risk, more stable
+            • Good for conservative investors
+            
+            **Mid Cap Stocks:**
+            • Growing companies (Titan, Asian Paints)
+            • Moderate risk & growth
+            • Balance of stability and growth
+            
+            **Small Cap Stocks:**
+            • Smaller companies (Tata Elxsi, Laurus Labs)
+            • Higher risk, higher potential
+            • For aggressive investors
+            
+            **Growth Stocks:**
+            • High-growth companies (DMart, Bajaj Finserv)
+            • Focus on future potential
+            • Higher volatility expected
+            
+            **Fixed Income:**
+            • Conservative allocation
+            • Provides stability
+            • Reduces portfolio volatility
+            """)
+        
+        st.markdown("### Allocation Breakdown")
+        st.markdown("<div style='background-color:#F9FAFB; padding:1.5rem; border-radius:10px;'>", unsafe_allow_html=True)
+        
+        for key, value in allocation.items():
+            if value > 0:
+                label = category_info.get(key, (key,))[0]
+                amount = (value / 100) * monthly_inv
+                st.markdown(f"""
+                <div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid #E5E7EB;">
+                    <div style="display:flex; justify-content:space-between;">
+                        <span style="font-weight:600;">{label}</span>
+                        <span style="font-weight:600;">{value}%</span>
+                    </div>
+                    <div style="color:#6B7280;">₹{amount:,.0f}/month</div>
                 </div>
-                <div style="color:#6B7280; font-size:0.9rem;">₹{amount:,.0f}/month</div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
+        
         st.markdown("</div>", unsafe_allow_html=True)
     
-    # Recommended Stocks
-    st.markdown('<h3 class="section-header">💎 Recommended Stocks (Examples)</h3>', unsafe_allow_html=True)
+    # Stock Recommendations
+    st.markdown('<h3 class="section-header">📈 Stock Suggestions for Your Profile</h3>', unsafe_allow_html=True)
     
-    st.markdown("""
-    <div class="info-box">
-        <strong>💡 Note:</strong> These are example stocks for educational purposes. 
-        Always do your own research or consult a financial advisor before investing.
-    </div>
-    """, unsafe_allow_html=True)
+    st.caption(f"""
+    Based on your **{st.session_state.risk_category}** profile and **{recommendations.get('strategy', 'Balanced')}** strategy.
+    These are example stocks that match your risk profile. Always do your own research before investing.
+    """)
     
-    mapped_categories = []
-    for alloc_key, perc in allocation.items():
-        db_key = ALLOCATION_TO_DB.get(alloc_key, alloc_key)
-        if perc > 0 and db_key in STOCKS_DB:
-            mapped_categories.append((db_key, perc))
-    
-    if not mapped_categories:
-        st.info("No matching stocks in the database for your allocation.")
-    else:
-        for category, perc in mapped_categories:
-            st.markdown(f"### **{category}** ({perc}% allocation)")
-            stocks = STOCKS_DB.get(category, [])
-            num_to_show = min(4, len(stocks))
-            
-            cols = st.columns(num_to_show)
-            for idx, stock in enumerate(stocks[:num_to_show]):
-                with cols[idx]:
-                    st.markdown(f"""
-                    <div style="background-color:white; padding:1rem; border-radius:8px; border:1px solid #E5E7EB; margin-bottom:0.5rem; height: 180px;">
-                        <div style="display:flex; justify-content:space-between; align-items:start; margin-bottom:0.4rem;">
-                            <span style="font-weight:700; font-size:1.05rem;">{stock['symbol']}</span>
-                            <span style="background-color:#F3F4F6; padding:0.25rem 0.5rem; border-radius:4px; font-size:0.8rem;">{stock['market_cap']}</span>
-                        </div>
-                        <p style="margin:0 0 0.4rem 0; color:#1F2937; font-size:0.95rem;">{stock['name']}</p>
-                        <div style="background-color:#E0F2FE; padding:0.25rem 0.5rem; border-radius:4px; display:inline-block;">
-                            <span style="color:#0EA5E9; font-size:0.85rem;">{stock['sector']}</span>
-                        </div>
-                        <div style="margin-top:1rem; padding-top:0.5rem; border-top:1px solid #E5E7EB;">
-                            <p style="margin:0; color:#6B7280; font-size:0.8rem;">Example allocation: ₹{(perc/100 * monthly_inv * (1/num_to_show)):,.0f}/month</p>
-                        </div>
+    if recommendations and recommendations.get('stocks'):
+        stocks = recommendations['stocks']
+        
+        # Create stock cards
+        cols = st.columns(min(3, len(stocks)))
+        
+        for idx, stock in enumerate(stocks):
+            with cols[idx % 3]:
+                st.markdown(f"""
+                <div style="background-color: white; padding: 1rem; border-radius: 8px; 
+                            border-left: 4px solid #3B82F6; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                    <h4 style="margin: 0 0 0.5rem 0;">{stock.get('symbol', '')}</h4>
+                    <p style="margin: 0 0 0.5rem 0; font-size: 0.9rem; color: #374151;">
+                        {stock.get('name', '')}
+                    </p>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
+                        <span style="font-size: 0.8rem; color: #6B7280;">{stock.get('sector', '')}</span>
+                        <span style="font-size: 0.8rem; 
+                                  color: {'#10B981' if stock.get('risk') == 'Low' else 
+                                          '#F59E0B' if stock.get('risk') == 'Medium' else 
+                                          '#EF4444'};">
+                            {stock.get('risk', 'Medium')} Risk
+                        </span>
                     </div>
-                    """, unsafe_allow_html=True)
-            st.markdown("---")
+                    <p style="font-size: 0.8rem; color: #4B5563; margin: 0;">
+                        {stock.get('note', '')}
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
     
-    # Navigation buttons
-    st.markdown("---")
+    # ETF Recommendations if any
+    if recommendations.get('etfs'):
+        st.markdown("#### ETF Suggestions (for diversification)")
+        etfs = recommendations['etfs']
+        
+        for etf in etfs:
+            st.markdown(f"• **{etf}** - Exchange Traded Fund for broad market exposure")
+    
+    # Show calculation methodology
+    show_calculation_methodology()
+    
     create_navigation_buttons()
 
-# -------------------------
-# Action Plan Tab (UPDATED with navigation)
-# -------------------------
+
 def create_action_plan_tab():
+    """Create action plan with step-by-step guidance"""
     st.markdown('<h1 class="main-header">🚀 Your Personalized Action Plan</h1>', unsafe_allow_html=True)
     
     if not st.session_state.assessment_complete:
         st.warning("Please complete the assessment first!")
-        st.button("Go to Assessment", on_click=lambda: setattr(st.session_state, 'current_tab', 'Assessment'))
+        if st.button("Go to Assessment"):
+            st.session_state.current_tab = "Assessment"
+            st.rerun()
         return
     
-    investment_data = st.session_state.safe_investment or {}
+    investment_data = st.session_state.safe_investment
+    financial_data = st.session_state.financial_data
+    
+    # Section explanation
+    show_section_explanation(
+        "Your Investment Action Plan",
+        "This step-by-step plan guides you from your current situation to successful stock investing. "
+        "Follow these steps in order for best results.",
+        [
+            "Complete each step before moving to the next",
+            "Timelines are realistic and achievable",
+            "Focus on one priority at a time"
+        ]
+    )
     
     # Implementation Timeline
-    st.markdown('<h3 class="section-header">📅 Implementation Timeline</h3>', unsafe_allow_html=True)
+    st.markdown('<h3 class="section-header">📅 Step-by-Step Implementation</h3>', unsafe_allow_html=True)
     
-    timeline_steps = []
-    if investment_data.get('ef_gap_amount', 0) > 0:
-        timeline_steps.append({
-            "title": "Build Emergency Fund", 
-            "duration": f"{investment_data['ef_build_timeline']} months", 
-            "action": f"Save ₹{investment_data['monthly_ef_saving']:,.0f}/month", 
-            "priority": "🔴 HIGH",
-            "icon": "🛡️"
+    steps = []
+    
+    # Step 1: Emergency Fund (if needed)
+    emergency_months = financial_data.get('emergency_months', 0)
+    if emergency_months < 3:
+        ef_gap = max(0, 3 - emergency_months)
+        monthly_ef = investment_data.get('monthly_ef_saving', 0)
+        
+        if monthly_ef > 0:
+            steps.append({
+                "title": "Build Emergency Fund",
+                "duration": f"{max(3, int(ef_gap * 3))} months",
+                "action": f"Save ₹{monthly_ef:,.0f}/month",
+                "priority": "HIGH",
+                "icon": "🛡️",
+                "details": f"Target: {ef_gap:.1f} months × ₹{financial_data.get('monthly_expenses', 0):,.0f} = ₹{ef_gap * financial_data.get('monthly_expenses', 0):,.0f}",
+                "why": "Emergency fund prevents selling investments during crises"
+            })
+    
+    # Step 2: Debt Reduction (if needed)
+    debt_score = st.session_state.answers.get('q4', 3)
+    if debt_score >= 4:
+        monthly_debt = investment_data.get('monthly_debt_payment', 0)
+        
+        if monthly_debt > 0:
+            steps.append({
+                "title": "Reduce High-Interest Debt",
+                "duration": "6-12 months",
+                "action": f"Pay ₹{monthly_debt:,.0f}/month extra",
+                "priority": "HIGH",
+                "icon": "💳",
+                "details": "Focus on debts >12% interest first",
+                "why": "Debt reduction gives guaranteed returns equal to interest rate"
+            })
+    
+    # Step 3: Start Investing (if suitable)
+    suitability = investment_data.get('suitability', {}).get('suitability', 'UNKNOWN')
+    if suitability in ["SUITABLE", "CAUTION ADVISED"]:
+        monthly_inv = investment_data.get('safe_monthly_investment', 0)
+        
+        if monthly_inv > 0:
+            steps.append({
+                "title": "Start Stock Investing",
+                "duration": "Begin immediately",
+                "action": f"Invest ₹{monthly_inv:,.0f}/month",
+                "priority": "MEDIUM",
+                "icon": "📈",
+                "details": f"Follow the {st.session_state.risk_category} allocation",
+                "why": "Regular investing builds wealth over time"
+            })
+    
+    # Step 4: Education (always)
+    experience = st.session_state.answers.get('q11', 2)
+    if experience <= 3:  # Beginner to Intermediate
+        steps.append({
+            "title": "Build Investing Knowledge",
+            "duration": "Ongoing",
+            "action": "1 hour/week learning",
+            "priority": "MEDIUM",
+            "icon": "📚",
+            "details": "Read books, follow markets, learn analysis",
+            "why": "Knowledge prevents mistakes and improves decisions"
         })
     
-    if st.session_state.answers.get('high_interest_debt', 0) > 0:
-        timeline_steps.append({
-            "title": "Pay High-Interest Debt", 
-            "duration": "Ongoing", 
-            "action": f"Pay ₹{investment_data['monthly_debt_payment']:,.0f}/month minimum", 
-            "priority": "🟡 MEDIUM",
-            "icon": "💳"
-        })
-    
-    if investment_data.get('safe_monthly_investment', 0) > 0:
-        timeline_steps.append({
-            "title": "Start Investing", 
-            "duration": "Immediate", 
-            "action": f"Invest ₹{investment_data['safe_monthly_investment']:,.0f}/month", 
-            "priority": "🟢 LOW",
-            "icon": "📈"
-        })
-    
-    for i, step in enumerate(timeline_steps):
+    # Display steps
+    for i, step in enumerate(steps):
         col1, col2, col3, col4 = st.columns([1, 3, 2, 1])
+        
         with col1:
-            st.markdown(f"<h1 style='margin: 0;'>{step['icon']}</h1>", unsafe_allow_html=True)
+            st.markdown(f"<h2 style='margin: 0;'>{step['icon']}</h2>", unsafe_allow_html=True)
+        
         with col2:
             st.markdown(f"""
-            <div style="padding:0.75rem;">
-                <h4 style="margin:0 0 0.5rem 0;">{i+1}. {step['title']}</h4>
-                <p style="margin:0; color:#4B5563;">{step['action']}</p>
+            <div style="padding: 1rem;">
+                <h4 style="margin: 0 0 0.5rem 0;">Step {i+1}: {step['title']}</h4>
+                <p style="margin: 0; color: #4B5563; font-size: 0.9rem;">{step['action']}</p>
+                <p style="margin: 0.25rem 0 0 0; color: #6B7280; font-size: 0.8rem;">{step['details']}</p>
             </div>
             """, unsafe_allow_html=True)
+        
         with col3:
             st.markdown(f"""
-            <div style="padding:0.75rem; background-color:#F3F4F6; border-radius:8px;">
-                <p style="margin:0; color:#6B7280; font-weight:600;">Duration</p>
-                <p style="margin:0.25rem 0 0 0; color:#1F2937; font-weight:600;">{step['duration']}</p>
+            <div style="padding: 1rem; background-color: #F3F4F6; border-radius: 8px;">
+                <p style="margin: 0; color: #6B7280; font-weight: 600;">Timeline</p>
+                <p style="margin: 0.25rem 0 0 0; font-weight: 600;">{step['duration']}</p>
             </div>
             """, unsafe_allow_html=True)
+        
         with col4:
-            priority_color = "#EF4444" if "HIGH" in step['priority'] else "#F59E0B" if "MEDIUM" in step['priority'] else "#10B981"
+            priority_color = "#EF4444" if step['priority'] == "HIGH" else "#F59E0B" if step['priority'] == "MEDIUM" else "#10B981"
             st.markdown(f"""
-            <div style="padding:0.75rem; background-color:{priority_color}10; border-radius:8px;">
-                <p style="margin:0; color:{priority_color}; font-weight:600;">{step['priority']}</p>
+            <div style="padding: 1rem; background-color: {priority_color}10; border-radius: 8px;">
+                <p style="margin: 0; color: {priority_color}; font-weight: 600;">{step['priority']}</p>
             </div>
             """, unsafe_allow_html=True)
+        
+        # Why this step matters
+        with st.expander(f"Why Step {i+1} matters"):
+            st.info(step['why'])
+        
+        st.markdown("---")
     
-    # Monthly Checklist
-    st.markdown('<h3 class="section-header">✅ Monthly Checklist</h3>', unsafe_allow_html=True)
+    # Next Steps Guidance
+    st.markdown('<h3 class="section-header">🔮 Next Steps After Implementation</h3>', unsafe_allow_html=True)
     
-    checklist_items = []
-    if investment_data.get('monthly_ef_saving', 0) > 0:
-        checklist_items.append(f"Save ₹{investment_data['monthly_ef_saving']:,.0f} for emergency fund")
-    if investment_data.get('monthly_debt_payment', 0) > 0:
-        checklist_items.append(f"Pay ₹{investment_data['monthly_debt_payment']:,.0f} towards high-interest debt")
-    if investment_data.get('safe_monthly_investment', 0) > 0:
-        checklist_items.append(f"Invest ₹{investment_data['safe_monthly_investment']:,.0f} as per allocation")
-    checklist_items.append("Review monthly expenses and budget")
-    checklist_items.append("Track net worth growth")
+    next_steps = [
+        ("Review Quarterly", "Check progress every 3 months. Adjust if circumstances change."),
+        ("Rebalance Annually", "Bring portfolio back to target allocation once per year."),
+        ("Increase Gradually", "Raise investment amount with salary increases."),
+        ("Stay Educated", "Continue learning about markets and investing."),
+        ("Avoid Panic", "Don't make emotional decisions during market declines.")
+    ]
     
-    for i, item in enumerate(checklist_items):
-        col1, col2 = st.columns([0.1, 0.9])
-        with col1:
-            st.markdown(f"<div style='margin-top: 0.5rem;'>✅</div>", unsafe_allow_html=True)
-        with col2:
-            st.markdown(f"<div style='margin-top: 0.5rem;'>{item}</div>", unsafe_allow_html=True)
+    for title, description in next_steps:
+        st.markdown(f"**{title}:** {description}")
     
-    # Quarterly Review
-    st.markdown('<h3 class="section-header">📋 Quarterly Review (Every 3 Months)</h3>', unsafe_allow_html=True)
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("""
-        <div class="card">
-            <h4 style="margin:0 0 1rem 0;">📊 Portfolio Check</h4>
-            <ul style="margin:0; padding-left:1.5rem; color:#4B5563;">
-                <li>Review allocation percentages</li>
-                <li>Check if rebalancing needed (±5%)</li>
-                <li>Review stock performance</li>
-                <li>Update financial health score</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    with col2:
-        st.markdown("""
-        <div class="card">
-            <h4 style="margin:0 0 1rem 0;">💰 Financial Check</h4>
-            <ul style="margin:0; padding-left:1.5rem; color:#4B5563;">
-                <li>Update income & expenses</li>
-                <li>Check emergency fund status</li>
-                <li>Review debt reduction progress</li>
-                <li>Adjust SIP if income changes</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
+    # Export Section
+    st.markdown('<h3 class="section-header">📄 Export Your Complete Plan</h3>', unsafe_allow_html=True)
     
-    # Export Options
-    st.markdown('<h3 class="section-header">📄 Export Your Plan</h3>', unsafe_allow_html=True)
     col1, col2, col3 = st.columns(3)
     
-    # PDF Export
     with col1:
-        if st.session_state.assessment_complete:
-            assessment_data = {
-                'answers': st.session_state.answers,
-                'financial_data': st.session_state.financial_health_score,
-                'risk_scores': st.session_state.risk_scores,
-                'risk_category': st.session_state.risk_category,
-                'override_log': st.session_state.override_log,
-                'allocation': st.session_state.allocation,
-                'contradictions': st.session_state.contradictions,
-                'investment_data': st.session_state.safe_investment,
-                'confidence_score': st.session_state.confidence_score
-            }
-            
-            pdf_generator = AssessmentPDF(assessment_data)
-            pdf_buffer = pdf_generator.generate_pdf()
-            pdf_bytes = pdf_buffer.getvalue()
-            
-            st.download_button(
-                label="📥 Download PDF Report",
-                data=pdf_bytes,
-                file_name=f"Stock_Risk_Advisor_Plan_{st.session_state.assessment_id}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
+        assessment_data = {
+            'answers': st.session_state.answers,
+            'financial_data': st.session_state.financial_data,
+            'risk_data': st.session_state.risk_data,
+            'risk_category': st.session_state.risk_category,
+            'allocation': st.session_state.allocation,
+            'investment_data': st.session_state.safe_investment,
+            'recommendations': st.session_state.recommendations
+        }
+        
+        pdf = AssessmentPDF(assessment_data)
+        pdf_buffer = pdf.generate_pdf()
+        
+        st.download_button(
+            label="📥 Download PDF Report",
+            data=pdf_buffer.getvalue(),
+            file_name=f"Stock_Risk_Advisor_{st.session_state.assessment_id}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            help="Complete assessment report with all recommendations"
+        )
     
-    # CSV Export
     with col2:
         if os.path.exists(CSV_FILE):
-            with open(CSV_FILE, 'r') as file:
-                csv_data = file.read()
+            with open(CSV_FILE, 'r', encoding='utf-8') as f:
+                csv_data = f.read()
             
             st.download_button(
                 label="📊 Download All Data CSV",
                 data=csv_data,
                 file_name="all_assessments.csv",
                 mime="text/csv",
-                use_container_width=True
+                use_container_width=True,
+                help="All assessments data for your research"
             )
     
-    # JSON Export
     with col3:
-        if st.session_state.assessment_complete:
-            assessment_json = json.dumps({
-                'assessment_id': st.session_state.assessment_id,
-                'timestamp': datetime.now().isoformat(),
-                'answers': st.session_state.answers,
-                'financial_health_score': st.session_state.financial_health_score,
-                'risk_scores': st.session_state.risk_scores,
-                'risk_category': st.session_state.risk_category,
-                'safe_investment': st.session_state.safe_investment,
-                'allocation': st.session_state.allocation
-            }, indent=2)
-            
-            st.download_button(
-                label="📁 Download JSON Report",
-                data=assessment_json,
-                file_name=f"assessment_{st.session_state.assessment_id}.json",
-                mime="application/json",
-                use_container_width=True
-            )
+        assessment_json = json.dumps({
+            'assessment_id': st.session_state.assessment_id,
+            'timestamp': datetime.now().isoformat(),
+            'model_version': MODEL_VERSION,
+            'answers': st.session_state.answers,
+            'financial_data': st.session_state.financial_data,
+            'risk_data': st.session_state.risk_data,
+            'risk_category': st.session_state.risk_category,
+            'safe_investment': st.session_state.safe_investment,
+            'allocation': st.session_state.allocation,
+            'recommendations': st.session_state.recommendations
+        }, indent=2, default=str)
+        
+        st.download_button(
+            label="📁 Download JSON Report",
+            data=assessment_json,
+            file_name=f"assessment_{st.session_state.assessment_id}.json",
+            mime="application/json",
+            use_container_width=True,
+            help="Structured data for analysis or integration"
+        )
     
-    # Navigation and Reset
-    st.markdown("---")
     create_navigation_buttons()
-    
-    st.markdown("### Want to start over?")
-    if st.button("🔄 Start New Assessment", type="secondary", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        init_session_state()
-        st.rerun()
 
-# -------------------------
-# Data & Export Tab
-# -------------------------
+
 def create_data_export_tab():
-    st.markdown('<h1 class="main-header">📊 Data Management & Export</h1>', unsafe_allow_html=True)
+    """Create data export and analysis tab"""
+    st.markdown('<h1 class="main-header">📊 Data Management & Research Export</h1>', unsafe_allow_html=True)
     
     df = CSVDataHandler.load_assessments_from_csv()
     
     if df.empty:
         st.info("No assessment data available yet. Complete an assessment to see data here.")
-        st.button("Go to Assessment", on_click=lambda: setattr(st.session_state, 'current_tab', 'Assessment'))
+        if st.button("Go to Assessment"):
+            st.session_state.current_tab = "Assessment"
+            st.rerun()
         return
     
-    # Statistics
+    # Section explanation
+    show_section_explanation(
+        "Assessment Data & Research Export",
+        "This section shows aggregated assessment data and allows export for research purposes. "
+        "All data is anonymized and stored locally.",
+        [
+            "Data includes financial metrics, risk scores, and recommendations",
+            "Useful for tracking trends and research analysis",
+            "Export formats: CSV, JSON, and visual charts"
+        ]
+    )
+    
+    # Statistics with model version filter
     st.markdown('<h3 class="section-header">📈 Assessment Statistics</h3>', unsafe_allow_html=True)
     
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Assessments", len(df))
-    with col2:
-        st.metric("Avg Financial Health", f"{df['financial_health_score'].mean():.1f}")
-    with col3:
-        st.metric("Avg Monthly Investment", f"₹{df['monthly_investment'].mean():,.0f}")
-    with col4:
-        most_common_risk = df['risk_category'].mode().iloc[0] if not df['risk_category'].mode().empty else 'N/A'
-        st.metric("Most Common Risk", most_common_risk)
+    # Filter by model version if available
+    if 'model_version' in df.columns:
+        current_version_df = df[df['model_version'] == MODEL_VERSION]
+        other_version_df = df[df['model_version'] != MODEL_VERSION]
+        
+        if not current_version_df.empty:
+            st.success(f"**Current Model ({MODEL_VERSION}):** {len(current_version_df)} assessments")
+            df = current_version_df
+        elif not other_version_df.empty:
+            st.warning(f"**Note:** Data from older model versions. Current: {MODEL_VERSION}")
+            df = other_version_df
     
-    # Recent Assessments
-    st.markdown('<h3 class="section-header">📋 Recent Assessments</h3>', unsafe_allow_html=True)
+    # Check required columns
+    required_cols = ['financial_health_score', 'overall_risk_score']
+    missing_cols = [col for col in required_cols if col not in df.columns]
     
-    recent_df = df.tail(10).copy()
-    recent_df['timestamp'] = pd.to_datetime(recent_df['timestamp'])
-    recent_df = recent_df.sort_values('timestamp', ascending=False)
-    
-    display_df = recent_df[['timestamp', 'monthly_income', 'monthly_expenses', 
-                           'financial_health_score', 'risk_category', 'monthly_investment']].copy()
-    display_df['monthly_income'] = display_df['monthly_income'].apply(lambda x: f"₹{x:,.0f}")
-    display_df['monthly_expenses'] = display_df['monthly_expenses'].apply(lambda x: f"₹{x:,.0f}")
-    display_df['monthly_investment'] = display_df['monthly_investment'].apply(lambda x: f"₹{x:,.0f}")
-    display_df['timestamp'] = display_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
-    
-    st.dataframe(display_df, use_container_width=True)
+    if missing_cols:
+        st.warning(f"Data format issue. Missing columns: {', '.join(missing_cols)}")
+        st.info("This may be data from an older version. New assessments will have proper format.")
+    else:
+        # Clean data
+        clean_df = df.dropna(subset=required_cols, how='any')
+        
+        if not clean_df.empty:
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                total = len(clean_df)
+                st.metric("Total Assessments", total)
+            
+            with col2:
+                avg_fh = clean_df['financial_health_score'].mean()
+                st.metric("Avg Financial Health", f"{avg_fh:.1f}" if not pd.isna(avg_fh) else "N/A")
+            
+            with col3:
+                if 'monthly_investment' in clean_df.columns:
+                    avg_inv = clean_df['monthly_investment'].mean()
+                    st.metric("Avg Monthly Investment", f"₹{avg_inv:,.0f}" if not pd.isna(avg_inv) else "₹0")
+            
+            with col4:
+                if 'risk_category' in clean_df.columns:
+                    most_common = clean_df['risk_category'].mode()
+                    if not most_common.empty:
+                        st.metric("Most Common Risk", most_common.iloc[0])
     
     # Visualizations
     st.markdown('<h3 class="section-header">📊 Data Visualizations</h3>', unsafe_allow_html=True)
     
-    col1, col2 = st.columns(2)
-    with col1:
-        risk_counts = df['risk_category'].value_counts()
-        fig1 = px.pie(values=risk_counts.values, names=risk_counts.index, 
-                     title="Risk Category Distribution")
-        st.plotly_chart(fig1, use_container_width=True)
+    if not df.empty and 'overall_risk_score' in df.columns and 'financial_health_score' in df.columns:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Risk Score Distribution
+            fig1 = px.histogram(
+                df, x='overall_risk_score',
+                nbins=20,
+                title='Distribution of Risk Scores',
+                labels={'overall_risk_score': 'Risk Score'},
+                color_discrete_sequence=['#3B82F6']
+            )
+            fig1.update_layout(height=300, margin=dict(t=40, b=20, l=20, r=20))
+            st.plotly_chart(fig1, use_container_width=True)
+        
+        with col2:
+            # Financial Health vs Risk Score
+            fig2 = px.scatter(
+                df, x='financial_health_score', y='overall_risk_score',
+                title='Financial Health vs Risk Score',
+                labels={'financial_health_score': 'Financial Health', 'overall_risk_score': 'Risk Score'},
+                color_discrete_sequence=['#10B981']
+            )
+            fig2.update_layout(height=300, margin=dict(t=40, b=20, l=20, r=20))
+            st.plotly_chart(fig2, use_container_width=True)
     
-    with col2:
-        fig2 = px.histogram(df, x='financial_health_score', nbins=20,
-                           title="Financial Health Score Distribution")
-        st.plotly_chart(fig2, use_container_width=True)
+    # Recent Assessments
+    st.markdown('<h3 class="section-header">📋 Recent Assessments</h3>', unsafe_allow_html=True)
     
-    # Export Options
+    if 'timestamp' in df.columns:
+        recent_df = df.head(10).copy()
+        
+        # Format display columns
+        display_cols = ['timestamp']
+        
+        # Add available columns
+        available_cols = ['financial_health_score', 'risk_category', 'monthly_investment', 
+                         'overall_risk_score', 'model_version']
+        
+        for col in available_cols:
+            if col in recent_df.columns:
+                display_cols.append(col)
+        
+        display_df = recent_df[display_cols].copy()
+        
+        # Format timestamp
+        if 'timestamp' in display_df.columns:
+            display_df['timestamp'] = display_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
+        
+        # Format monthly investment
+        if 'monthly_investment' in display_df.columns:
+            display_df['monthly_investment'] = display_df['monthly_investment'].apply(
+                lambda x: f"₹{x:,.0f}" if not pd.isna(x) and x > 0 else "₹0"
+            )
+        
+        # Format scores
+        score_cols = ['financial_health_score', 'overall_risk_score']
+        for col in score_cols:
+            if col in display_df.columns:
+                display_df[col] = display_df[col].apply(
+                    lambda x: f"{x:.1f}" if not pd.isna(x) else "N/A"
+                )
+        
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+    
+    # Export Options with explanations
     st.markdown('<h3 class="section-header">📁 Export Options</h3>', unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        csv = df.to_csv(index=False)
+        csv_data = df.to_csv(index=False)
         st.download_button(
             label="📊 Download Full CSV",
-            data=csv,
-            file_name="all_assessments_full.csv",
+            data=csv_data,
+            file_name=f"stock_risk_assessments_{datetime.now().strftime('%Y%m%d')}.csv",
             mime="text/csv",
-            use_container_width=True
+            use_container_width=True,
+            help="Complete dataset in CSV format for analysis"
         )
     
     with col2:
-        summary_stats = df.describe().to_string()
+        # JSON export
+        json_data = df.to_json(orient='records', indent=2)
         st.download_button(
-            label="📈 Download Summary Stats",
-            data=summary_stats,
-            file_name="assessment_summary.txt",
-            mime="text/plain",
-            use_container_width=True
+            label="📁 Download JSON Data",
+            data=json_data,
+            file_name=f"assessments_{datetime.now().strftime('%Y%m%d')}.json",
+            mime="application/json",
+            use_container_width=True,
+            help="Structured JSON data for programmatic analysis"
         )
     
     with col3:
         if st.button("🗑️ Clear All Data", type="secondary", use_container_width=True):
-            st.warning("This will delete all assessment data. Are you sure?")
-            col_confirm, col_cancel = st.columns(2)
-            with col_confirm:
-                if st.button("Yes, Delete All Data"):
+            st.warning("### ⚠️ Delete All Assessment Data")
+            st.markdown("This will permanently delete all stored assessment data. This action cannot be undone.")
+            
+            col_yes, col_no = st.columns(2)
+            with col_yes:
+                if st.button("Yes, Delete All Data", type="primary"):
                     try:
-                        os.remove(CSV_FILE)
-                        st.success("All assessment data has been cleared!")
-                        st.rerun()
+                        if os.path.exists(CSV_FILE):
+                            os.remove(CSV_FILE)
+                            st.success("✅ All data cleared successfully!")
+                            st.rerun()
+                        else:
+                            st.info("No data file found.")
                     except Exception as e:
                         st.error(f"Error clearing data: {str(e)}")
-            with col_cancel:
-                if st.button("Cancel"):
+            with col_no:
+                if st.button("Cancel", type="secondary"):
                     st.rerun()
     
-    # Navigation
-    st.markdown("---")
+    # Research Notes
+    with st.expander("🔬 Research & Academic Use Notes"):
+        st.markdown(f"""
+        ### For Research & Academic Purposes
+        
+        **Dataset Description:**
+        - **Variables:** 30+ variables including demographics, financial metrics, risk scores, recommendations
+        - **Sample:** {len(df)} assessments (as of {datetime.now().strftime('%Y-%m-%d')})
+        - **Model:** Version {MODEL_VERSION}
+        
+        **Key Variables for Analysis:**
+        1. **Demographics:** Age group, income, expenses
+        2. **Financial Metrics:** Savings rate, emergency fund, debt status
+        3. **Psychological Factors:** Risk tolerance, emotional responses
+        4. **Investment Factors:** Time horizon, goals, experience
+        5. **Outcomes:** Risk category, recommended allocation, investment amount
+        
+        **Research Applications:**
+        - Behavioral finance studies
+        - Risk profiling algorithms
+        - Financial literacy assessment
+        - Investment recommendation systems
+        
+        **Ethical Considerations:**
+        - Data is anonymized
+        - Educational purpose only
+        - Not financial advice
+        - Local storage only
+        
+        **Citation Suggestion:**
+        > Stock Risk Advisor Assessment Data. Model Version {MODEL_VERSION}. 
+        > [Your Institution], {datetime.now().strftime('%Y')}.
+        """)
+    
     create_navigation_buttons()
 
-# -------------------------
-# MAIN FUNCTION
-# -------------------------
+
+def create_welcome_tab():
+    """Create welcome tab with enhanced explanations"""
+    st.markdown('<h1 class="main-header">📈 Welcome to Stock Risk Advisor v2.1!</h1>', unsafe_allow_html=True)
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.markdown("""
+        ## Your Intelligent Stock Investment Guide
+        
+        **Stock Risk Advisor helps you make informed, personalized stock investment decisions**
+        based on your complete financial profile and risk tolerance.
+        
+        ### 🎯 What Makes This Tool Different?
+        
+        ✅ **Comprehensive Assessment** - 14 questions across 4 key dimensions  
+        ✅ **Transparent Methodology** - See exactly how recommendations are calculated  
+        ✅ **Financial Health First** - Checks emergency fund & debt before investing  
+        ✅ **Personalized Recommendations** - Stocks and allocation matching YOUR profile  
+        ✅ **Research-Ready** - Export data for academic or personal analysis  
+        ✅ **Educational Focus** - Learn about investing while getting recommendations  
+        
+        ### 📋 What You'll Get
+        
+        1. **Financial Health Score** - How ready you are to invest  
+        2. **Risk Profile** - Your personalized risk category  
+        3. **Portfolio Allocation** - Large/Mid/Small cap percentages  
+        4. **Specific Stock Suggestions** - Examples matching your profile  
+        5. **Safe Investment Amount** - Sustainable monthly investment  
+        6. **Action Plan** - Step-by-step implementation guide  
+        7. **Export Options** - PDF, CSV, JSON reports  
+        
+        ### ⏱️ Time Required
+        **8-10 minutes** for 14 comprehensive questions
+        
+        ### 🔒 Privacy & Data
+        • All data stored locally on your device  
+        • No registration or personal information required  
+        • Export and delete data anytime  
+        • Educational purpose only - not financial advice  
+        """)
+    
+    with col2:
+        st.image("https://img.icons8.com/color/300/000000/stock-exchange.png", width=250)
+        
+        # Quick stats if available
+        try:
+            stats = CSVDataHandler.get_statistics()
+            if stats and stats['total_assessments'] > 0:
+                st.markdown("---")
+                st.markdown("### 📊 Community Stats")
+                st.metric("Total Assessments", stats['total_assessments'])
+                st.metric("Avg Financial Health", f"{stats['avg_financial_health']:.1f}")
+                st.metric("Most Common Risk", stats['most_common_risk_category'])
+        except:
+            pass
+    
+    st.markdown("---")
+    
+    # Start button
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        if st.button("▶️ Begin Comprehensive Assessment", type="primary", use_container_width=True, key="start_assessment"):
+            st.session_state.current_tab = "Assessment"
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # Assessment Overview
+    st.markdown("""
+    ### 📋 Assessment Overview
+    
+    #### Part 1: Financial Foundation (4 questions)
+    - Income, expenses, emergency fund, debt situation
+    - **Purpose:** Check if you're financially ready to invest
+    
+    #### Part 2: Goals & Timeframe (3 questions)
+    - Investment purpose, timeline, loss importance
+    - **Purpose:** Match strategy to your objectives
+    
+    #### Part 3: Risk Psychology (3 questions)
+    - Emotional reactions, loss tolerance, volatility view
+    - **Purpose:** Understand your true risk tolerance
+    
+    #### Part 4: Experience & Personal (4 questions)
+    - Knowledge, experience, liquidity needs, age
+    - **Purpose:** Customize recommendations to your situation
+    """)
+    
+    # Methodology Preview
+    with st.expander("🔬 Preview: How We Calculate Recommendations"):
+        st.markdown(f"""
+        ### Transparent Assessment Methodology (v{MODEL_VERSION})
+        
+        Your recommendations are calculated using a **weighted multi-dimensional model**:
+        
+        **1. Financial Stability (30%)**
+        - Emergency Fund: 40%
+        - Debt Situation: 35%
+        - Savings Rate: 25%
+        
+        **2. Risk Tolerance (30%)**
+        - Loss Importance: 30%
+        - Emotional Reaction: 25%
+        - Loss Tolerance: 30%
+        - Volatility View: 15%
+        
+        **3. Investment Horizon (20%)**
+        - Primary Goal: 40%
+        - Timeframe: 40%
+        - Liquidity Needs: 20%
+        
+        **4. Knowledge & Experience (20%)**
+        - Experience: 60%
+        - Knowledge: 40%
+        
+        **Plus:**
+        • Age-appropriate allocation (younger = more equity)
+        • Suitability checks before recommendations
+        • Sustainable investment amount calculation
+        
+        **Model Features:**
+        ✅ No double-counting of factors  
+        ✅ Realistic Indian income/expense ranges  
+        ✅ Emergency fund & debt priority checks  
+        ✅ Transparent weighting system  
+        ✅ Research-quality data collection  
+        """)
+    
+    # Disclaimer
+    st.markdown("""
+    ---
+    <div style='text-align:center; color:#6B7280; font-size:0.9rem; padding:1rem 0;'>
+        <p>⚠️ <strong>Educational Purpose Only</strong> - This tool helps understand stock investing principles.</p>
+        <p>We are not SEBI-registered investment advisors. This is not financial advice.</p>
+        <p>Investing in stocks involves risk of loss. Past performance doesn't guarantee future results.</p>
+        <p>Model Version: {MODEL_VERSION} | Data stored locally in CSV format</p>
+    </div>
+    """.format(MODEL_VERSION=MODEL_VERSION), unsafe_allow_html=True)
+
+
+# ============================================================================
+# MAIN APP
+# ============================================================================
+
 def main():
-    # Sidebar
+    """Main application function"""
+    
+    # Sidebar with enhanced information
     with st.sidebar:
         st.image("https://img.icons8.com/color/96/000000/stock-exchange.png", width=80)
         st.title("Stock Risk Advisor")
+        st.caption(f"Model v{MODEL_VERSION}")
         st.markdown("---")
         
+        # Navigation
         st.subheader("📊 Navigation")
-        tabs = ["Welcome", "Assessment", "Financial Health", "Risk Profile", "Recommendations", "Action Plan", "Data & Export"]
+        tabs = ["Welcome", "Assessment", "Financial Health", "Risk Profile", 
+                "Recommendations", "Action Plan", "Data & Export"]
+        
         for tab in tabs:
-            if st.button(f"📝 {tab}", key=f"nav_{tab}", use_container_width=True):
+            if st.button(f"📝 {tab}", use_container_width=True, 
+                        help=f"Go to {tab} section"):
                 st.session_state.current_tab = tab
                 st.rerun()
         
         st.markdown("---")
         
+        # Assessment Status
         if st.session_state.assessment_complete:
             st.success("✅ Assessment Complete")
-            if st.button("🔄 Start New Assessment", use_container_width=True):
-                for key in list(st.session_state.keys()):
-                    del st.session_state[key]
-                init_session_state()
-                st.rerun()
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔄 New", help="Start new assessment", use_container_width=True):
+                    for key in list(st.session_state.keys()):
+                        del st.session_state[key]
+                    init_session_state()
+                    st.rerun()
+            with col2:
+                if st.button("📊 Results", help="View results", use_container_width=True):
+                    st.session_state.current_tab = "Financial Health"
+                    st.rerun()
         else:
             st.info("📋 Complete assessment to see results")
+            if st.button("Start Assessment", use_container_width=True):
+                st.session_state.current_tab = "Assessment"
+                st.rerun()
         
         st.markdown("---")
         
-        # Statistics
-        stats = CSVDataHandler.get_statistics()
-        if stats and stats['total_assessments'] > 0:
-            with st.expander("📈 Overall Statistics"):
-                st.metric("Total Assessments", stats['total_assessments'])
-                st.metric("Avg Financial Health", f"{stats['avg_financial_health']:.1f}")
-                st.metric("Most Common Risk", stats['most_common_risk_category'])
-                st.metric("Avg Monthly Investment", f"₹{stats['avg_monthly_investment']:,.0f}")
+        # Statistics with enhanced display
+        try:
+            stats = CSVDataHandler.get_statistics()
+            if stats and stats['total_assessments'] > 0:
+                with st.expander("📈 Overall Statistics", expanded=False):
+                    st.metric("Total Assessments", stats['total_assessments'])
+                    st.metric("Model Version", stats.get('model_version', MODEL_VERSION))
+                    st.metric("Avg Financial Health", f"{stats['avg_financial_health']:.1f}")
+                    st.metric("Avg Risk Score", f"{stats.get('avg_risk_score', 0):.1f}")
+                    st.metric("Most Common Risk", stats['most_common_risk_category'])
+                    st.metric("Avg Monthly Investment", f"₹{stats['avg_monthly_investment']:,.0f}")
+        except:
+            pass
         
-        with st.expander("ℹ️ About This Tool"):
-            st.markdown("""
-            **How it works:**
-            1. Answer 12 questions about your finances
-            2. Get your Financial Health Score
-            3. Receive personalized risk assessment
-            4. Get stock recommendations matching your profile
-            5. Create an actionable investment plan
-
-            **Features:**
-            ✅ Financial Health Assessment
-            ✅ Risk Profiling (90-point system)
-            ✅ Safe Investment Calculator
-            ✅ Personalized Stock Allocation
-            ✅ Safety Overrides for Protection
-            ✅ PDF Export & CSV Data Storage
-
-            ⚠️ **Educational purpose only.** Not financial advice.
+        st.markdown("---")
+        
+        # About Section with detailed information
+        with st.expander("ℹ️ About This Tool", expanded=False):
+            st.markdown(f"""
+            ### Stock Risk Advisor v{MODEL_VERSION}
+            
+            **Purpose:**
+            Educational tool for understanding stock investment risk assessment.
+            
+            **Methodology:**
+            1. 14-question multi-dimensional assessment
+            2. Four assessment dimensions
+            3. Transparent scoring system
+            4. Age-appropriate recommendations
+            
+            **Key Features:**
+            ✅ Financial health assessment first
+            ✅ Risk profiling without double-counting
+            ✅ Suitability checks
+            ✅ Personalized stock suggestions
+            ✅ Sustainable investment amounts
+            ✅ Export options (PDF, CSV, JSON)
+            ✅ Research-quality data collection
+            
+            **Assessment Parts:**
+            1. **Financial Foundation** (4 questions)
+            2. **Goals & Timeframe** (3 questions)
+            3. **Risk Psychology** (3 questions)
+            4. **Experience & Personal** (4 questions)
+            
+            **Data & Privacy:**
+            • All data stored locally
+            • No personal identification collected
+            • Export/delete anytime
+            • Educational use only
+            
+            **⚠️ Important Notice:**
+            We are not SEBI-registered investment advisors.
+            This is **not financial advice**.
+            Investing involves risk of loss.
+            
+            **For Research:**
+            • Transparent methodology
+            • Exportable data
+            • Version tracking
+            • Academic applications
             """)
     
-    # Main content with progress bar
+    # Main content
     create_progress_bar()
     
-    # Show current tab
-    current_tab = st.session_state.current_tab
-    if current_tab == "Welcome":
-        create_welcome_tab()
-    elif current_tab == "Assessment":
-        create_assessment_tab()
-    elif current_tab == "Financial Health":
-        create_financial_health_tab()
-    elif current_tab == "Risk Profile":
-        create_risk_profile_tab()
-    elif current_tab == "Recommendations":
-        create_recommendations_tab()
-    elif current_tab == "Action Plan":
-        create_action_plan_tab()
-    elif current_tab == "Data & Export":
-        create_data_export_tab()
+    # Route to correct tab
+    tab_functions = {
+        "Welcome": create_welcome_tab,
+        "Assessment": create_assessment_tab,
+        "Financial Health": create_financial_health_tab,
+        "Risk Profile": create_risk_profile_tab,
+        "Recommendations": create_recommendations_tab,
+        "Action Plan": create_action_plan_tab,
+        "Data & Export": create_data_export_tab
+    }
     
-    # Footer
+    current_tab = st.session_state.current_tab
+    if current_tab in tab_functions:
+        tab_functions[current_tab]()
+    
+    # Enhanced Footer
     st.markdown("---")
-    st.markdown("""
+    st.markdown(f"""
     <div style='text-align:center; color:#6B7280; font-size:0.9rem; padding:1rem 0;'>
         <p>⚠️ <strong>Educational Purpose Only</strong> - This tool helps understand stock investing based on risk profiles.</p>
         <p>We are not SEBI-registered investment advisors. This is not financial advice.</p>
-        <p>Data is stored locally in CSV format for analysis and export.</p>
+        <p>Investing in stocks involves risk of loss. Past performance doesn't guarantee future results.</p>
+        <p>Data is stored locally in CSV format for analysis and export. Model Version: {MODEL_VERSION}</p>
+        <p style='font-size:0.8rem; margin-top:1rem;'>
+            Icons by <a href='https://icons8.com' target='_blank'>Icons8</a> | 
+            Built with <a href='https://streamlit.io' target='_blank'>Streamlit</a>
+        </p>
     </div>
     """, unsafe_allow_html=True)
+
 
 if __name__ == "__main__":
     main()
