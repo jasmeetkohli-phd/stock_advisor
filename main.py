@@ -1401,7 +1401,7 @@ def create_welcome_tab():
            
         
         
-        ### 📋 What You'll Get
+        ### What You'll Get
         
         1. **Financial Health Score** - How ready you are to invest  
         2. **Debt Health Analysis** - Good vs bad debt assessment  
@@ -1413,19 +1413,17 @@ def create_welcome_tab():
         8. **Step-by-Step Action Plan** - Clear implementation guide  
         9. **Data Export** - Download all your assessment data
         
-        ### ⏱️ Time Required
+        ### Time Required
         **10-12 minutes** for comprehensive assessment
         
-        ### 🔒 Privacy & Data
+        ### Privacy & Data
         • All data stored locally on your device  
         • No registration or personal information required  
         • Export and delete data anytime  
         • Educational purpose only - not financial advice  
         """)
     
-    with col2:
-        st.image("https://img.icons8.com/color/300/000000/stock-exchange.png", width=250)
-        
+           
         # Quick stats
         try:
             stats = CSVDataHandler.get_statistics()
@@ -1450,9 +1448,9 @@ def create_welcome_tab():
     st.markdown("---")
     
     # Methodology Preview
-    with st.expander("🔬 Preview: How We Calculate Recommendations"):
+    with st.expander("Preview: How We Calculate Recommendations"):
         st.markdown(f"""
-        ### Transparent Assessment Methodology (v{MODEL_VERSION})
+        ### Transparent Assessment Methodology)
         
         **Five Key Dimensions:**
         1. **Financial Stability (25%)** - Emergency fund, income stability, savings rate
@@ -1473,12 +1471,12 @@ def create_welcome_tab():
     st.markdown("""
     ---
     <div style='text-align:center; color:#6B7280; font-size:0.9rem; padding:1rem 0;'>
-        <p>⚠️ <strong>Educational Purpose Only</strong> - This tool helps understand stock investing principles.</p>
+        <p> <strong>Educational Purpose Only</strong> - This tool helps understand stock investing principles.</p>
         <p>We are not SEBI-registered investment advisors. This is not financial advice.</p>
         <p>Investing in stocks involves risk of loss. Past performance doesn't guarantee future results.</p>
-        <p>Data is stored locally in CSV format for analysis and export. Model Version: {MODEL_VERSION}</p>
+       
     </div>
-    """.format(MODEL_VERSION=MODEL_VERSION), unsafe_allow_html=True)
+   
 
 def create_assessment_tab():
     """Create the assessment tab"""
@@ -2866,4 +2864,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
