@@ -1387,7 +1387,7 @@ def create_progress_bar():
 
 def create_welcome_tab():
     """Create welcome tab"""
-    st.markdown('<h1 class="main-header">📈 Welcome to Stock Risk Advisor v3.3!</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">📈 Welcome to Stock Risk Advisor </h1>', unsafe_allow_html=True)
     
     col1, col2 = st.columns([2, 1])
     
@@ -1398,15 +1398,8 @@ def create_welcome_tab():
         **Stock Risk Advisor helps you make informed, personalized stock investment decisions**
         based on your complete financial profile, risk tolerance, and investment goals.
         
-        ### 🎯 What's New in Version 3.3?
+           
         
-        ✅ **Sequential Tab Flow** - Complete assessment flow step-by-step  
-        ✅ **Fixed Data Export** - All assessments properly saved and displayed  
-        ✅ **Enhanced Recommendations** - Detailed investment breakdown  
-        ✅ **Inflation Strategy Selection** - Choose between growth, protection, or balanced  
-        ✅ **ESG Integration** - Filter stocks based on sustainability preferences  
-        ✅ **Enhanced Stock Database** - Inflation characteristics and ESG ratings  
-        ✅ **Personalized Recommendations** - Based on risk + ESG + inflation preferences  
         
         ### 📋 What You'll Get
         
@@ -2873,3 +2866,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
